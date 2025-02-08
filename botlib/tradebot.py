@@ -289,7 +289,7 @@ class TradingBot:
         ) Analyzes news with GPT
         ) Builds a big textual prompt incl. multi-timeframe TAs (all 21 TAs each for 5m,15m,1h),
             order book ratio, google trends, santiment, reddit sentiment, etc.
-        ) Generates local GPT signals
+        ) Generates GPT signals
         ) Computes TAs for each timeframe => 63 features
         ) Builds an 11-feature context vector
         ) Feeds all inputs (3 time-series arrays + 63 TA + 11 context + etc...) into LSTM => final signal
@@ -457,7 +457,7 @@ class TradingBot:
 
         aggregator_prompt = "\n".join(prompt_lines)
         
-        # ) Local GPT signals from aggregator_prompt
+        # ) GPT signals from aggregator_prompt
         temperature_variants = [0.1, 0.5]
         local_signals = []
         for temp in temperature_variants:
@@ -473,7 +473,7 @@ class TradingBot:
                 use_real_gpt
             )
             local_signals.append(val)
-        self.logger.info(f"[Aggregator] Local GPT signals => {local_signals}")
+        self.logger.info(f"[Aggregator] GPT signals => {local_signals}")
 
         # ) Build the 11-dim context
         eq_btc_val = balances["BTC"] * current_price
@@ -517,7 +517,7 @@ class TradingBot:
         else:
             final_pred = 0 #
 
-        # ) Combine local GPT average with final_pred
+        # ) Combine GPT average with final_pred
         # gpt_avg = sum(local_signals)/len(local_signals)
         # final_signal = 0.5*final_pred + 0.5*gpt_avg
         # self.logger.info(f"[Aggregator] final combined => {final_signal:.2f}")

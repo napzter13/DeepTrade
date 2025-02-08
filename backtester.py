@@ -44,9 +44,12 @@ TRAINING_DATA_FILE = os.path.join("output", "training_data.csv")
 RL_TRANSITIONS_FILE = os.path.join("output", "rl_transitions.csv")
 
 
-GO_BACK_DAYS = 30
+# Start/end
+START_TIME = datetime.datetime(2024, 1, 1)
+END_TIME = datetime.datetime.now()
+        
 DO_USE_REAL_GPT = False
-DO_USE_MODEL_PRED = True
+DO_USE_MODEL_PRED = False
 BLOCK_SANTIMENT_FETCHING = True
 
 
@@ -204,7 +207,7 @@ class HistoricalTradingBot(TradingBot):
 # Backtester
 ###############################################################################
 class Backtester:
-    def __init__(self, start_date=None, end_date=None):
+    def __init__(self):
         self.logger = get_logger("Backtester")
 
         # RL Transitions
@@ -221,15 +224,8 @@ class Backtester:
         if not PAPER_TRADING:
             self.logger.warning("Forcing PAPER_TRADING=True in backtester!")
 
-        # Start/end
-        if start_date is None:
-            self.start_date = datetime.datetime.utcnow() - datetime.timedelta(days=GO_BACK_DAYS)
-        else:
-            self.start_date = start_date
-        self.end_date = end_date if end_date else datetime.datetime.utcnow()
-
         # We'll floor current_time to the hour
-        self.current_time = self.start_date.replace(minute=0, second=0, microsecond=0)
+        self.current_time = START_TIME.replace(minute=0, second=0, microsecond=0)
 
         # CSV init
         self.init_csv_scenarios()
@@ -238,7 +234,7 @@ class Backtester:
         # Buffer for training
         self.feature_buffer = {}
 
-        # 4 local GPT scenarios + final
+        # 4 GPT scenarios + final
         self.scenarios = {
             "local_gpt_1":  {"equity": 10000.0, "position": "NONE", "entry_price": None},
             "local_gpt_2":  {"equity": 10000.0, "position": "NONE", "entry_price": None},
@@ -274,8 +270,8 @@ class Backtester:
                 ])
 
     def run_backtest(self):
-        self.logger.info(f"=== Starting Backtest from {self.start_date} to {self.end_date} stepping 1h ===")
-        while self.current_time <= self.end_date:
+        self.logger.info(f"=== Starting Backtest from {START_TIME} to {END_TIME} stepping 1h ===")
+        while self.current_time <= END_TIME:
             self.logger.info(f"[Backtest] hour => {self.current_time}")
             self.bot.set_current_datetime(self.current_time)
             self.bot.run_cycle()  # normal TradingBot logic

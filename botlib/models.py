@@ -67,7 +67,7 @@ def get_local_model_assessment(
     use_real_gpt = True
 ):
     """
-    Cache local GPT calls to avoid re-calling multiple times during backtest.
+    Cache GPT calls to avoid re-calling multiple times during backtest.
     """
     if timestamp == None:
         key_dt = datetime.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
