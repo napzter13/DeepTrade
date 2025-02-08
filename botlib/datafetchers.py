@@ -405,7 +405,7 @@ def fetch_news_data(days=1, end_dt=None):
         logger.info(f"[fetch_news_data] Using cache => {key}")
         return cache_dict[key]
     
-    if end_dt < (datetime.datetime.now() - datetime.timedelta(days=30)):
+    if end_dt != None and end_dt < (datetime.datetime.now() - datetime.timedelta(days=30)):
         return []
 
     logger.info(f"[fetch_news_data] Not in cache => fetch => {key}")
