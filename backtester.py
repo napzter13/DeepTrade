@@ -2,8 +2,7 @@
 """
 backtester.py
 
-- Iterates from the earliest date (or 1 month back if none specified)
-  up to a user-specified end_date (default=now), stepping 1 hour at a time.
+- Iterates from 2024-01-01 up to 2025-01-01, stepping 1 hour at a time.
 - For each hour:
    1) We set the HistoricalTradingBot to that 'current_time'.
    2) We run the normal TradingBot logic => produce last_log_data (including signals).
@@ -24,17 +23,25 @@ import json
 import datetime
 import sys
 import signal
+import math
+import threading
 
 from botlib.tradebot import TradingBot
 from botlib.environment import PAPER_TRADING
 from botlib.environment import get_logger
+
+# --------------------------------------------------------------------------------
+# You can adjust these if you want a different exact time range:
+START_TIME = datetime.datetime(2024, 1, 1)
+END_TIME   = datetime.datetime(2025, 1, 1)  # up to but not including 2025-01-01
+# --------------------------------------------------------------------------------
 
 # Create needed directories
 os.makedirs("input_cache", exist_ok=True)
 os.makedirs("output", exist_ok=True)
 os.makedirs("debug", exist_ok=True)  # for sanity-check logs
 
-# We'll have 4 scenario-based CSVs plus final:
+# We'll have scenario-based CSVs plus final:
 CSV_GPT1  = os.path.join("output", "backtest_result_local_gpt_1.csv")
 CSV_GPT2  = os.path.join("output", "backtest_result_local_gpt_2.csv")
 CSV_FINAL = os.path.join("output", "backtest_result_final_signal.csv")
@@ -43,14 +50,14 @@ CSV_FINAL = os.path.join("output", "backtest_result_final_signal.csv")
 TRAINING_DATA_FILE = os.path.join("output", "training_data.csv")
 RL_TRANSITIONS_FILE = os.path.join("output", "rl_transitions.csv")
 
-
-# Start/end
-START_TIME = datetime.datetime(2024, 1, 1)
-END_TIME = datetime.datetime.now()
-        
 DO_USE_REAL_GPT = False
 DO_USE_MODEL_PRED = False
 BLOCK_SANTIMENT_FETCHING = True
+
+# Global concurrency variable:
+CONCURRENT_THREADS = 3
+# We'll use a lock to prevent file write collisions:
+file_write_lock = threading.Lock()
 
 
 ###############################################################################
@@ -59,7 +66,7 @@ BLOCK_SANTIMENT_FETCHING = True
 class HistoricalTradingBot(TradingBot):
     """
     A TradingBot subclass that doesn't store extra local historical_data.
-    It overrides data fetch but simply calls `super()` to rely on
+    It overrides data fetch but calls `super()` to rely on
     caching from datafetchers.py if needed.
     """
     def __init__(self):
@@ -98,7 +105,10 @@ class HistoricalTradingBot(TradingBot):
         return super().fetch_google_trends(end_dt or self.current_datetime)
 
     def fetch_santiment_data(self, end_dt=None, only_look_in_cache=False):
-        return super().fetch_santiment_data(end_dt or self.current_datetime, BLOCK_SANTIMENT_FETCHING)
+        return super().fetch_santiment_data(
+            end_dt or self.current_datetime,
+            BLOCK_SANTIMENT_FETCHING
+        )
 
     def fetch_reddit_sentiment(self, dt=None):
         return super().fetch_reddit_sentiment(dt or self.current_datetime)
@@ -168,35 +178,30 @@ class HistoricalTradingBot(TradingBot):
         """
         The normal TradingBot cycle. We'll store last_log_data => last_iteration_data
         for the backtester to use.
-
-        We also copy out the RL state and action so the backtester can store them offline.
+        Also copy RL state/action so the backtester can store them offline.
         """
         super().run_cycle()
 
         if hasattr(self, "last_log_data"):
             self.last_iteration_data = self.last_log_data.copy()
 
-            # We'll keep track of RL states for offline usage:
+            # RL states for offline usage:
             self.last_iteration_data["old_rl_state"] = self.prev_rl_state_vec
             self.last_iteration_data["action"] = self.last_log_data.get("action", "HOLD")
 
-            # The TradingBot's run_cycle built a new state for the next iteration
-            # but we didn't store it. We'll replicate building it here to capture
-            # the new state, so the backtester can store it as next_state.
+            # Build new RL state for the next iteration
             final_signal = self.last_log_data.get("final_signal", 0.0)
             atr_percent  = self.last_log_data.get("atr_percent", 0.0)
             balances     = self.last_log_data.get("balances", {"BTC":0,"EUR":0})
             price        = self.last_log_data.get("current_price", 0.0)
 
             new_state_vec = None
-            if price>0:
+            if price > 0:
                 new_state_vec = self.build_rl_state(final_signal, atr_percent, balances, price)
 
             self.last_iteration_data["new_rl_state"] = new_state_vec
-            # Also store the "reward" from the last iteration:
             self.last_iteration_data["reward"] = self.last_log_data.get("reward", 0.0)
 
-            # We'll update prev_rl_state_vec for next iteration:
             self.prev_rl_state_vec = new_state_vec
             self.prev_action = self.last_iteration_data["action"]
         else:
@@ -207,15 +212,15 @@ class HistoricalTradingBot(TradingBot):
 # Backtester
 ###############################################################################
 class Backtester:
-    def __init__(self):
+    def __init__(self, start_time=None, end_time=None):
         self.logger = get_logger("Backtester")
 
         # RL Transitions
-        if not os.path.exists(RL_TRANSITIONS_FILE):
-            with open(RL_TRANSITIONS_FILE, "w", encoding="utf-8", newline="") as f:
-                w = csv.writer(f)
-                w.writerow(["old_state","action","reward","new_state","done"])
-
+        with file_write_lock:
+            if not os.path.exists(RL_TRANSITIONS_FILE):
+                with open(RL_TRANSITIONS_FILE, "w", encoding="utf-8", newline="") as f:
+                    w = csv.writer(f)
+                    w.writerow(["old_state","action","reward","new_state","done"])
 
         # Our specialized historical bot
         self.bot = HistoricalTradingBot()
@@ -224,8 +229,12 @@ class Backtester:
         if not PAPER_TRADING:
             self.logger.warning("Forcing PAPER_TRADING=True in backtester!")
 
-        # We'll floor current_time to the hour
-        self.current_time = START_TIME.replace(minute=0, second=0, microsecond=0)
+        # If start_time/end_time are provided, use them; otherwise fallback
+        self.start_time = start_time if start_time else START_TIME
+        self.end_time   = end_time   if end_time   else END_TIME
+
+        # Floor to the hour
+        self.current_time = self.start_time.replace(minute=0, second=0, microsecond=0)
 
         # CSV init
         self.init_csv_scenarios()
@@ -234,7 +243,7 @@ class Backtester:
         # Buffer for training
         self.feature_buffer = {}
 
-        # 4 GPT scenarios + final
+        # 3 local scenarios + final
         self.scenarios = {
             "local_gpt_1":  {"equity": 10000.0, "position": "NONE", "entry_price": None},
             "local_gpt_2":  {"equity": 10000.0, "position": "NONE", "entry_price": None},
@@ -245,45 +254,57 @@ class Backtester:
         self.prev_iteration_data = None
 
     def init_csv_scenarios(self):
-        headers = ["timestamp","price","google_trend","reddit_sent","santim_social_volume","news_sent","pred_y","action","equity"]
-        for fn in [CSV_GPT1, CSV_GPT2, CSV_FINAL]:
-            with open(fn, "w", newline="", encoding="utf-8") as f:
-                w=csv.writer(f)
-                w.writerow(headers)
+        headers = [
+            "timestamp","price","google_trend","reddit_sent",
+            "santim_social_volume","news_sent","pred_y","action","equity"
+        ]
+        with file_write_lock:
+            # If the file doesn't exist, write header. Otherwise, append
+            for fn in [CSV_GPT1, CSV_GPT2, CSV_FINAL]:
+                file_exists = os.path.exists(fn)
+                mode = "a" if file_exists else "w"
+                with open(fn, mode, newline="", encoding="utf-8") as f:
+                    if not file_exists:
+                        w = csv.writer(f)
+                        w.writerow(headers)
 
     def init_csv_training(self):
         """
-        training_data.csv => columns: [
-           timestamp, arr_5m, arr_15m, arr_1h, arr_google_trend,
-           arr_santiment, arr_ta_63, arr_ctx_11, y
-        ]
+        training_data.csv => columns:
+          [timestamp, arr_5m, arr_15m, arr_1h,
+           arr_google_trend, arr_santiment,
+           arr_ta_63, arr_ctx_11,
+           y]
         """
-        if not os.path.exists(TRAINING_DATA_FILE):
-            os.makedirs(os.path.dirname(TRAINING_DATA_FILE), exist_ok=True)
-            with open(TRAINING_DATA_FILE,"w",newline="",encoding="utf-8") as f:
-                w=csv.writer(f)
-                w.writerow([
-                    "timestamp", "arr_5m", "arr_15m", "arr_1h",
-                    "arr_google_trend", "arr_santiment",
-                    "arr_ta_63", "arr_ctx_11",
-                    "y"
-                ])
+        with file_write_lock:
+            if not os.path.exists(TRAINING_DATA_FILE):
+                os.makedirs(os.path.dirname(TRAINING_DATA_FILE), exist_ok=True)
+                with open(TRAINING_DATA_FILE, "w", newline="", encoding="utf-8") as f:
+                    w = csv.writer(f)
+                    w.writerow([
+                        "timestamp", "arr_5m", "arr_15m", "arr_1h",
+                        "arr_google_trend", "arr_santiment",
+                        "arr_ta_63", "arr_ctx_11",
+                        "y"
+                    ])
 
     def run_backtest(self):
-        self.logger.info(f"=== Starting Backtest from {START_TIME} to {END_TIME} stepping 1h ===")
-        while self.current_time <= END_TIME:
+        self.logger.info(
+            f"=== Starting Backtest from {self.start_time} to {self.end_time}, step=1h ==="
+        )
+        while self.current_time < self.end_time:
             self.logger.info(f"[Backtest] hour => {self.current_time}")
             self.bot.set_current_datetime(self.current_time)
             self.bot.run_cycle()  # normal TradingBot logic
             iteration_data = self.bot.last_iteration_data.copy()
 
             if iteration_data:
-                # Build training data for LSTM
+                # LSTM training data
                 self.handle_training_buffer(iteration_data)
-                # Build scenario-based CSV logs
+                # Scenario-based CSV logs
                 self.handle_scenarios(iteration_data)
 
-                # ------------------- RL    ---------------------------------
+                # RL transitions
                 old_state_vec = iteration_data.get("old_rl_state", None)
                 next_state_vec= iteration_data.get("new_rl_state", None)
                 reward = iteration_data.get("reward", 0.0)
@@ -291,17 +312,16 @@ class Backtester:
                 done = False
 
                 if old_state_vec is not None and next_state_vec is not None:
-                    # append row to rl_transitions.csv
-                    with open(RL_TRANSITIONS_FILE, "a", encoding="utf-8", newline="") as f:
-                        w = csv.writer(f)
-                        w.writerow([
-                            json.dumps(old_state_vec.tolist()), 
-                            action,
-                            reward,
-                            json.dumps(next_state_vec.tolist()),
-                            int(done)
-                        ])
-                # -----------------------------------------------------------
+                    with file_write_lock:
+                        with open(RL_TRANSITIONS_FILE, "a", encoding="utf-8", newline="") as f:
+                            w = csv.writer(f)
+                            w.writerow([
+                                json.dumps(old_state_vec.tolist()),
+                                action,
+                                reward,
+                                json.dumps(next_state_vec.tolist()),
+                                int(done)
+                            ])
 
             self.current_time += datetime.timedelta(hours=1)
             self.prev_iteration_data = iteration_data
@@ -310,8 +330,8 @@ class Backtester:
 
     def handle_training_buffer(self, iteration_data):
         """
-        Store each iteration's data => after +3h we get the actual future price,
-        then we log to training_data.csv for supervised LSTM fitting.
+        Store each iteration's data => after +3h, we get the actual future price,
+        then we log that row to training_data.csv for supervised LSTM fitting.
         """
         now_ts = self.current_time.replace(minute=0, second=0, microsecond=0)
         now_str = now_ts.strftime("%Y-%m-%d %H:%M")
@@ -328,7 +348,7 @@ class Backtester:
         }
         self.feature_buffer[now_str] = rowdict
 
-        # Check if we have data from 3h ago => we can compute the future price change
+        # Check data from 3h ago => compute future price change => log
         dt_ago = now_ts - datetime.timedelta(hours=3)
         dt_ago_str = dt_ago.strftime("%Y-%m-%d %H:%M")
 
@@ -339,41 +359,37 @@ class Backtester:
 
             if old_price > 0.0:
                 pct = ((new_price - old_price)/old_price) * 100.0
-                ratio = pct
-                if ratio > 1:
-                    ratio = 1
-                if ratio < -1:
-                    ratio = -1
-                y_val = ratio
+                # clamp to [-1,1] for y
+                ratio = max(-1, min(1, pct))
             else:
-                y_val = 0.0
+                ratio = 0.0
 
-            with open(TRAINING_DATA_FILE, "a", newline="", encoding="utf-8") as f:
-                w=csv.writer(f)
-                w.writerow([
-                    dt_ago_str,
-                    oldrow["arr_5m"],
-                    oldrow["arr_15m"],
-                    oldrow["arr_1h"],
-                    oldrow["arr_google_trend"],
-                    oldrow["arr_santiment"],
-                    oldrow["arr_ta_63"],
-                    oldrow["arr_ctx_11"],
-                    f"{y_val:.4f}"
-                ])
+            with file_write_lock:
+                with open(TRAINING_DATA_FILE, "a", newline="", encoding="utf-8") as f:
+                    w = csv.writer(f)
+                    w.writerow([
+                        dt_ago_str,
+                        oldrow["arr_5m"],
+                        oldrow["arr_15m"],
+                        oldrow["arr_1h"],
+                        oldrow["arr_google_trend"],
+                        oldrow["arr_santiment"],
+                        oldrow["arr_ta_63"],
+                        oldrow["arr_ctx_11"],
+                        f"{ratio:.4f}"
+                    ])
 
-            # Remove that entry from buffer so it doesn't get re-used
+            # Remove that entry from buffer so it doesn't get reused
             del self.feature_buffer[dt_ago_str]
 
     def handle_scenarios(self, iteration_data):
         """
         Each scenario invests based on a single numeric signal:
-          if signal>10 => LONG, if<-10 => SHORT, else HOLD.
-        We log each scenario's action & equity to CSV.
+          if signal > 10 => LONG, if signal < -10 => SHORT, else HOLD.
         """
         ts_str = self.current_time.strftime("%Y-%m-%d %H:%M")
         price = iteration_data.get("current_price", 0.0)
-        
+
         # For google trend, check if array is non-empty
         arr_gt = iteration_data.get("arr_google_trend", [])
         if arr_gt and len(arr_gt) > 0 and len(arr_gt[0]) > 0:
@@ -381,8 +397,8 @@ class Backtester:
         else:
             google_trend = 0.0
 
-        reddit_sent  = int(iteration_data.get("reddit_sent", 0))
-        santim_social_volume_total       = iteration_data.get("santiment", {})['social_volume_total']
+        reddit_sent = int(iteration_data.get("reddit_sent", 0))
+        santim_social_volume_total = iteration_data.get("santiment", {}).get('social_volume_total', 0)
 
         # The aggregator's local_gpt_signals => [gpt1, gpt2]
         local_signals = iteration_data.get("local_gpt_signals", [0, 0])
@@ -400,103 +416,149 @@ class Backtester:
             ent = sc["entry_price"]
             act = "HOLD"
 
-            if sig_val>10:
-                if pos=="NONE":
-                    # open LONG
-                    eq *= 0.999  # sim fee or slip
-                    sc["position"]="LONG"
-                    sc["entry_price"]=price
-                    act="OPEN_LONG"
-                elif pos=="SHORT":
+            if sig_val > 10:
+                if pos == "NONE":
+                    eq *= 0.999
+                    sc["position"] = "LONG"
+                    sc["entry_price"] = price
+                    act = "OPEN_LONG"
+                elif pos == "SHORT":
                     # close short => open long
-                    ratio= ent/price
+                    ratio = ent / price
                     eq *= ratio
                     eq *= 0.999
-                    sc["position"]="LONG"
-                    sc["entry_price"]=price
-                    act="CLOSE_SHORT_OPEN_LONG"
+                    sc["position"] = "LONG"
+                    sc["entry_price"] = price
+                    act = "CLOSE_SHORT_OPEN_LONG"
                 else:
-                    act="KEEP_LONG"
-            elif sig_val<-10:
-                if pos=="NONE":
+                    act = "KEEP_LONG"
+            elif sig_val < -10:
+                if pos == "NONE":
                     eq *= 0.999
-                    sc["position"]="SHORT"
-                    sc["entry_price"]=price
-                    act="OPEN_SHORT"
-                elif pos=="LONG":
-                    ratio= price/ent
+                    sc["position"] = "SHORT"
+                    sc["entry_price"] = price
+                    act = "OPEN_SHORT"
+                elif pos == "LONG":
+                    ratio = price / ent
                     eq *= ratio
                     eq *= 0.999
-                    sc["position"]="SHORT"
-                    sc["entry_price"]=price
-                    act="CLOSE_LONG_OPEN_SHORT"
+                    sc["position"] = "SHORT"
+                    sc["entry_price"] = price
+                    act = "CLOSE_LONG_OPEN_SHORT"
                 else:
-                    act="KEEP_SHORT"
+                    act = "KEEP_SHORT"
             else:
-                # hold => maybe close existing
-                if pos=="LONG":
-                    ratio= price/ent
+                # close if open
+                if pos == "LONG":
+                    ratio = price / ent
                     eq *= ratio
                     eq *= 0.999
-                    sc["position"]="NONE"
-                    sc["entry_price"]=None
-                    act="CLOSE_LONG"
-                elif pos=="SHORT":
-                    ratio= ent/price
+                    sc["position"] = "NONE"
+                    sc["entry_price"] = None
+                    act = "CLOSE_LONG"
+                elif pos == "SHORT":
+                    ratio = ent / price
                     eq *= ratio
                     eq *= 0.999
-                    sc["position"]="NONE"
-                    sc["entry_price"]=None
-                    act="CLOSE_SHORT"
+                    sc["position"] = "NONE"
+                    sc["entry_price"] = None
+                    act = "CLOSE_SHORT"
                 else:
-                    act="HOLD_NONE"
+                    act = "HOLD_NONE"
 
-            sc["equity"]= eq
+            sc["equity"] = eq
             return act, eq
 
         # local_gpt_1
         a1, eq1 = update_scenario("local_gpt_1", gpt1)
-        with open(CSV_GPT1, "a", newline="", encoding="utf-8") as f:
-            w=csv.writer(f)
-            w.writerow([
-                ts_str, price, google_trend, reddit_sent,
-                santim_social_volume_total, news_signal, gpt1, a1, eq1
-            ])
+        with file_write_lock:
+            with open(CSV_GPT1, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow([
+                    ts_str, price, google_trend, reddit_sent,
+                    santim_social_volume_total, news_signal,
+                    gpt1, a1, eq1
+                ])
 
         # local_gpt_2
         a2, eq2 = update_scenario("local_gpt_2", gpt2)
-        with open(CSV_GPT2, "a", newline="", encoding="utf-8") as f:
-            w=csv.writer(f)
-            w.writerow([
-                ts_str, price, google_trend, reddit_sent,
-                santim_social_volume_total, news_signal, gpt2, a2, eq2
-            ])
+        with file_write_lock:
+            with open(CSV_GPT2, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow([
+                    ts_str, price, google_trend, reddit_sent,
+                    santim_social_volume_total, news_signal,
+                    gpt2, a2, eq2
+                ])
 
         # final_signal
         aF, eqF = update_scenario("final_signal", final_signal)
-        with open(CSV_FINAL, "a", newline="", encoding="utf-8") as f:
-            w=csv.writer(f)
-            w.writerow([
-                ts_str, price, google_trend, reddit_sent,
-                santim_social_volume_total, news_signal, final_signal, aF, eqF
-            ])
+        with file_write_lock:
+            with open(CSV_FINAL, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow([
+                    ts_str, price, google_trend, reddit_sent,
+                    santim_social_volume_total, news_signal,
+                    final_signal, aF, eqF
+                ])
 
-    # Handle exit
+    # Optional: Called only in single-thread mode
     def handle_ctrl_c(self, sig, frame):
-        """
-        Custom handler for CTRL+C (SIGINT).
-        """
         self.logger.info("=== Exiting gracefully ===\n")
-        
         sys.exit(0)
 
 
+def run_thread_chunk(thread_id, start_dt, end_dt):
+    """
+    Each thread runs its own Backtester over a portion of the time range.
+    NOTE: We do not call signal.signal(...) here because Python only
+    allows that in the main thread.
+    """
+    backtester = Backtester(start_time=start_dt, end_time=end_dt)
+    backtester.logger.info(f"Thread {thread_id} => chunk: {start_dt} to {end_dt}")
+    backtester.run_backtest()
+
 
 def main():
-    os.system('cls')  # clear terminal on Windows (no-op on other OS)
-    backtester = Backtester()
-    signal.signal(signal.SIGINT, backtester.handle_ctrl_c)
-    backtester.run_backtest()
+    # Handle Ctrl+C in main thread
+    def handle_main_ctrl_c(sig, frame):
+        print("=== Ctrl+C intercepted (main thread) => exiting ===")
+        sys.exit(0)
+    signal.signal(signal.SIGINT, handle_main_ctrl_c)
+
+    os.system('cls' if os.name == 'nt' else 'clear')  # clear terminal on Windows/*nix
+
+    # Calculate total hours in the range
+    total_hours = int((END_TIME - START_TIME).total_seconds() // 3600)
+    if total_hours <= 0:
+        # Fallback if date range is invalid or zero
+        backtester = Backtester()
+        backtester.run_backtest()
+        return
+
+    # Divide time range among CONCURRENT_THREADS
+    chunk_size = math.ceil(total_hours / CONCURRENT_THREADS)
+    threads = []
+
+    for i in range(CONCURRENT_THREADS):
+        chunk_start = START_TIME + datetime.timedelta(hours=(i * chunk_size))
+        chunk_end   = START_TIME + datetime.timedelta(hours=((i+1) * chunk_size))
+        if chunk_start >= END_TIME:
+            break
+        if chunk_end > END_TIME:
+            chunk_end = END_TIME
+
+        t = threading.Thread(
+            target=run_thread_chunk,
+            args=(i, chunk_start, chunk_end),
+            daemon=True
+        )
+        t.start()
+        threads.append(t)
+
+    for t in threads:
+        t.join()
+
 
 if __name__ == "__main__":
     main()

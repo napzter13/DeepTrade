@@ -17,6 +17,7 @@ import csv
 import datetime
 import traceback
 import json
+import threading
 
 import numpy as np
 
@@ -996,7 +997,8 @@ class TradingBot:
             done = False  # for now, always false in live/paper
             self.rl_agent.store_transition(state_vec, action, reward, next_state_vec, done)
             self.rl_agent.train_step()
-            self.rl_agent.save()
+            if threading.current_thread() is threading.main_thread():
+                self.rl_agent.save()
             
             self.save_gpt_cache()
 
