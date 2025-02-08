@@ -1,0 +1,7 @@
+__pycache__/
+botlib/__pycache__/
+.env
+debug/
+input_cache/
+models/
+output/
