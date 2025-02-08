@@ -37,6 +37,9 @@ and optional offline Reinforcement Learning (DQN).
 
 ### Additional Important Directories and Files
 
+- **`.env.copy`**  
+  - Example environment configuration file. Rename this to `.env` and fill in your API keys and other required environment variables.
+
 - **`botlib/`**  
   A local Python package directory with submodules for:
   - `tradebot.py`: The `TradingBot` class and all logic for data fetching, aggregator, RL state-building, and position management.
@@ -74,7 +77,7 @@ and optional offline Reinforcement Learning (DQN).
    (Project libraries like `tensorflow`, `transformers`, `schedule`, `openai`, `binance`, `sklearn` etc. are assumed.)
 
 2. **Prepare Environment**  
-   - Copy or rename `.env.example` to `.env` (if provided) and fill with your keys (e.g., BINANCE_API_KEY, NEWS_API_KEY, etc.).  
+   - Copy or rename `.env.copy` to `.env` and fill in your API keys and other required variables.  
    - Or define environment variables directly for any external APIs.
 
 3. **Run the Backtester**  
@@ -130,7 +133,7 @@ and optional offline Reinforcement Learning (DQN).
 This project does not yet have a formal license.  
 **Use at your own risk**, for non-commercial or internal research purposes.  
 
-For questions, contact the maintainer or open an Issue on GitHub.
+For questions, contact the maintainer or open an Issue on GitHub. 
 
 ---
 
