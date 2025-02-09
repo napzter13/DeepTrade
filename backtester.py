@@ -32,8 +32,8 @@ from botlib.environment import get_logger
 
 # --------------------------------------------------------------------------------
 # You can adjust these if you want a different exact time range:
-START_TIME = datetime.datetime(2024, 1, 1)
-END_TIME   = datetime.datetime(2025, 1, 1)  # up to but not including 2025-01-01
+START_TIME = datetime.datetime(2023, 1, 1)
+END_TIME   = datetime.datetime(2024, 1, 1)  # up to but not including 2025-01-01
 # --------------------------------------------------------------------------------
 
 # Create needed directories
