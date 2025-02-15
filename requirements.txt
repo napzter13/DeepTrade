@@ -10,3 +10,5 @@ python-binance
 praw
 portalocker
 pytrends
+graphviz
+pydot

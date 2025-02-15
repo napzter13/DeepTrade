@@ -7,7 +7,10 @@ import os
 import re
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import layers
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import openai
+import datetime
+from tensorflow.keras.utils import plot_model
 from .environment import (
     MIXTRAL_MODEL_PATH,
     DEEPSEEK_MODEL_PATH,
@@ -15,9 +18,7 @@ from .environment import (
     OPENAI_API_KEY,
     get_logger
 )
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import openai
-import datetime
+from .nn_model import build_multi_timeframe_model
 
 logger = get_logger("Models")
 
@@ -151,129 +152,7 @@ If you are unsure, provide your best estimate within the specified range."""
     except Exception as e:
         logger.error(f"OpenAI error: {e}")
         return 0.0
-
-###############################################################################
-# Advanced LSTM Model
-###############################################################################
-
-def build_multi_timeframe_model(
-    window_5m=60,
-    feature_5m=9,
-    window_15m=60,
-    feature_15m=9,
-    window_1h=60,
-    feature_1h=9,
-    window_google_trend=8,
-    feature_google_trend=1,
-    santiment_dim=12,
-    ta_dim=63,
-    signal_dim=11
-):
-    """
-    Multi-input LSTM model with increased dropout, slightly smaller LSTM sizes, 
-    and a lower learning rate for improved generalization on noisy data.
-    """
-
-    # Optional small weight decay (L2 regularization) for LSTM & Dense:
-    l2_reg = tf.keras.regularizers.l2(1e-6)
-    dropout_rate = 0.2
-
-    # === 5m branch ===
-    input_5m = layers.Input(shape=(window_5m, feature_5m), name="input_5m")
-    x_5m = layers.LSTM(96, return_sequences=True,
-                       kernel_regularizer=l2_reg)(input_5m)
-    x_5m = layers.Dropout(dropout_rate)(x_5m)
-    x_5m = layers.LSTM(48, return_sequences=False,
-                       kernel_regularizer=l2_reg)(x_5m)
-    x_5m = layers.Dropout(dropout_rate)(x_5m)
-    x_5m = layers.Dense(48, activation='relu', kernel_regularizer=l2_reg)(x_5m)
-
-    # === 15m branch ===
-    input_15m = layers.Input(shape=(window_15m, feature_15m), name="input_15m")
-    x_15m = layers.LSTM(96, return_sequences=True,
-                        kernel_regularizer=l2_reg)(input_15m)
-    x_15m = layers.Dropout(dropout_rate)(x_15m)
-    x_15m = layers.LSTM(48, return_sequences=False,
-                        kernel_regularizer=l2_reg)(x_15m)
-    x_15m = layers.Dropout(dropout_rate)(x_15m)
-    x_15m = layers.Dense(48, activation='relu', kernel_regularizer=l2_reg)(x_15m)
-
-    # === 1h branch ===
-    input_1h = layers.Input(shape=(window_1h, feature_1h), name="input_1h")
-    x_1h = layers.LSTM(96, return_sequences=True,
-                       kernel_regularizer=l2_reg)(input_1h)
-    x_1h = layers.Dropout(dropout_rate)(x_1h)
-    x_1h = layers.LSTM(48, return_sequences=False,
-                       kernel_regularizer=l2_reg)(x_1h)
-    x_1h = layers.Dropout(dropout_rate)(x_1h)
-    x_1h = layers.Dense(48, activation='relu', kernel_regularizer=l2_reg)(x_1h)
-
-    # === google_trend branch ===
-    input_google_trend = layers.Input(shape=(window_google_trend, feature_google_trend),
-                                      name="input_google_trend")
-    x_google_trend = layers.LSTM(96, return_sequences=True,
-                                 kernel_regularizer=l2_reg)(input_google_trend)
-    x_google_trend = layers.Dropout(dropout_rate)(x_google_trend)
-    x_google_trend = layers.LSTM(48, return_sequences=False,
-                                 kernel_regularizer=l2_reg)(x_google_trend)
-    x_google_trend = layers.Dropout(dropout_rate)(x_google_trend)
-    x_google_trend = layers.Dense(48, activation='relu',
-                                  kernel_regularizer=l2_reg)(x_google_trend)
-
-    # === Santiment context (12-dim) ===
-    input_santiment = layers.Input(shape=(santiment_dim,), name="input_santiment")
-    x_santiment = layers.Dense(48, activation='relu', kernel_regularizer=l2_reg)(input_santiment)
-    x_santiment = layers.Dropout(dropout_rate)(x_santiment)
-    x_santiment = layers.Dense(24, activation='relu', kernel_regularizer=l2_reg)(x_santiment)
     
-    # === TA context (63-dim) ===
-    input_ta = layers.Input(shape=(ta_dim,), name="input_ta")
-    x_ta = layers.Dense(48, activation='relu', kernel_regularizer=l2_reg)(input_ta)
-    x_ta = layers.Dropout(dropout_rate)(x_ta)
-    x_ta = layers.Dense(24, activation='relu', kernel_regularizer=l2_reg)(x_ta)
-
-    # Merge the four LSTM branches + Santiment + TA
-    merged_lstm_ta = layers.concatenate(
-        [x_5m, x_15m, x_1h, x_google_trend, x_santiment, x_ta],
-        name="concat_lstm_ta"
-    )
-
-    # Dense block on the merged features
-    x = layers.Dense(64, activation='relu', kernel_regularizer=l2_reg)(merged_lstm_ta)
-    x = layers.Dropout(dropout_rate)(x)
-    x = layers.Dense(32, activation='relu', kernel_regularizer=l2_reg)(x)
-    x = layers.Dropout(dropout_rate)(x)
-
-    # === Final signals context (11-dim) ===
-    input_signal = layers.Input(shape=(signal_dim,), name="input_signal")
-    x_sig = layers.Dense(24, activation='relu', kernel_regularizer=l2_reg)(input_signal)
-    x_sig = layers.Dropout(dropout_rate)(x_sig)
-
-    # Merge partial network x with x_sig
-    x_merged_signal = layers.concatenate([x, x_sig], name="concat_signal")
-
-    # Additional dense -> output
-    x2 = layers.Dense(64, activation='relu', kernel_regularizer=l2_reg)(x_merged_signal)
-    x2 = layers.Dropout(dropout_rate)(x2)
-    out = layers.Dense(1, activation='tanh', name="output",
-                       kernel_regularizer=l2_reg)(x2)
-
-    # Build the model
-    model = tf.keras.Model(
-        inputs=[
-            input_5m, input_15m, input_1h, input_google_trend,
-            input_santiment, input_ta, input_signal
-        ],
-        outputs=out
-    )
-
-    # Use Adam with a smaller LR, e.g. 1e-4
-    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
-    model.compile(optimizer=optimizer, loss='mse')
-
-    return model
-
-
 
 def load_advanced_lstm_model(model_5m_window=60, model_15m_window=60, model_1h_window=60, feature_dim=9, santiment_dim=12, ta_dim=63, signal_dim=11):
     if os.path.exists(ADVANCED_MODEL_PATH):
@@ -290,6 +169,9 @@ def load_advanced_lstm_model(model_5m_window=60, model_15m_window=60, model_1h_w
             window_1h=model_1h_window,   feature_1h=feature_dim,
             santiment_dim=santiment_dim,
             ta_dim=ta_dim,      signal_dim=signal_dim)
+    
+    plot_model(m, to_file="models/advanced_lstm_model_architecture.png", show_shapes=True, show_layer_names=True)
+    
     try:
         m.save(ADVANCED_MODEL_PATH)
     except Exception as e:

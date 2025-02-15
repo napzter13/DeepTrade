@@ -65,7 +65,7 @@ class Trainer:
         ta_dim=63,
         signal_dim=11,
         epochs=600,
-        batch_size=4096,
+        batch_size=2048,
         apply_scaling=True,
         train_ratio=0.7,
         val_ratio=0.2,
@@ -466,7 +466,7 @@ class Trainer:
             state_dim=state_dim,
             gamma=0.99,
             lr=0.001,
-            batch_size=4096,
+            batch_size=2048,
             max_memory=len(transitions)+1,  # to hold all transitions
             epsilon_start=0.0,   # no exploration needed for offline
             epsilon_min=0.0,
@@ -526,7 +526,7 @@ def parse_args():
                         help="File to save the LSTM model.")
     parser.add_argument("--epochs", type=int, default=600,
                         help="Epochs for LSTM.")
-    parser.add_argument("--batch_size", type=int, default=4096,
+    parser.add_argument("--batch_size", type=int, default=2048,
                         help="Batch size for LSTM.")
     parser.add_argument("--no_scale", action="store_true",
                         help="Disable scaling for time-series branches.")

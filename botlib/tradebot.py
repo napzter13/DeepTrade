@@ -18,7 +18,7 @@ import datetime
 import traceback
 import json
 import threading
-
+from pathlib import Path
 import numpy as np
 
 from binance.client import Client
@@ -158,6 +158,18 @@ class TradingBot:
             ta_dim=self.context_ta_dim,
             signal_dim=self.context_sig_dim
         )
+        
+        # Delete all files ending with .lock and .tmp in input_cache:
+        for file in Path("input_cache").glob("*.lock"):
+            try:
+                file.unlink()
+            except Exception as e:
+                print(f"Error deleting {file}: {e}")
+        for file in Path("input_cache").glob("*.tmp"):
+            try:
+                file.unlink()
+            except Exception as e:
+                print(f"Error deleting {file}: {e}")
 
     def _initialize_trade_log(self):
         """
