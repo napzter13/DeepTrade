@@ -157,107 +157,120 @@ If you are unsure, provide your best estimate within the specified range."""
 ###############################################################################
 
 def build_multi_timeframe_model(
-    window_5m=60,    # number of timesteps for 5m input
-    feature_5m=9,    # # of features per bar in 5m
-    window_15m=60,   
+    window_5m=60,
+    feature_5m=9,
+    window_15m=60,
     feature_15m=9,
     window_1h=60,
     feature_1h=9,
     window_google_trend=8,
     feature_google_trend=1,
     santiment_dim=12,
-    ta_dim=63,       # size of TA context vector
-    signal_dim=11    # size of "signals" context vector
+    ta_dim=63,
+    signal_dim=11
 ):
     """
-    Multi-input model with:
-      1) 5m LSTM branch
-      2) 15m LSTM branch
-      3) 1h LSTM branch
-      4) google_trend LSTM branch
-      5) santiment input (12-dim)
-      6) TA context input (63-dim)
-      7) Signal context input (11-dim)
-
-    Steps:
-      - Each LSTM branch -> a small embedding (dense) -> we merge them with the TA context branch
-      - Then we have an intermediate dense block
-      - Then we incorporate the final 'signal context' (the 11-dim) in a second merge
-      - Then produce a single float in [-1,1]
+    Multi-input LSTM model with increased dropout, slightly smaller LSTM sizes, 
+    and a lower learning rate for improved generalization on noisy data.
     """
+
+    # Optional small weight decay (L2 regularization) for LSTM & Dense:
+    l2_reg = tf.keras.regularizers.l2(1e-6)
+    dropout_rate = 0.2
 
     # === 5m branch ===
     input_5m = layers.Input(shape=(window_5m, feature_5m), name="input_5m")
-    x_5m = layers.LSTM(64, return_sequences=True)(input_5m)
-    x_5m = layers.Dropout(0.2)(x_5m)
-    x_5m = layers.LSTM(32, return_sequences=False)(x_5m)
-    x_5m = layers.Dropout(0.2)(x_5m)
-    x_5m = layers.Dense(32, activation='relu')(x_5m)  # final 5m embedding
+    x_5m = layers.LSTM(96, return_sequences=True,
+                       kernel_regularizer=l2_reg)(input_5m)
+    x_5m = layers.Dropout(dropout_rate)(x_5m)
+    x_5m = layers.LSTM(48, return_sequences=False,
+                       kernel_regularizer=l2_reg)(x_5m)
+    x_5m = layers.Dropout(dropout_rate)(x_5m)
+    x_5m = layers.Dense(48, activation='relu', kernel_regularizer=l2_reg)(x_5m)
 
     # === 15m branch ===
     input_15m = layers.Input(shape=(window_15m, feature_15m), name="input_15m")
-    x_15m = layers.LSTM(64, return_sequences=True)(input_15m)
-    x_15m = layers.Dropout(0.2)(x_15m)
-    x_15m = layers.LSTM(32, return_sequences=False)(x_15m)
-    x_15m = layers.Dropout(0.2)(x_15m)
-    x_15m = layers.Dense(32, activation='relu')(x_15m)  # final 15m embedding
+    x_15m = layers.LSTM(96, return_sequences=True,
+                        kernel_regularizer=l2_reg)(input_15m)
+    x_15m = layers.Dropout(dropout_rate)(x_15m)
+    x_15m = layers.LSTM(48, return_sequences=False,
+                        kernel_regularizer=l2_reg)(x_15m)
+    x_15m = layers.Dropout(dropout_rate)(x_15m)
+    x_15m = layers.Dense(48, activation='relu', kernel_regularizer=l2_reg)(x_15m)
 
     # === 1h branch ===
     input_1h = layers.Input(shape=(window_1h, feature_1h), name="input_1h")
-    x_1h = layers.LSTM(64, return_sequences=True)(input_1h)
-    x_1h = layers.Dropout(0.2)(x_1h)
-    x_1h = layers.LSTM(32, return_sequences=False)(x_1h)
-    x_1h = layers.Dropout(0.2)(x_1h)
-    x_1h = layers.Dense(32, activation='relu')(x_1h)  # final 1h embedding
+    x_1h = layers.LSTM(96, return_sequences=True,
+                       kernel_regularizer=l2_reg)(input_1h)
+    x_1h = layers.Dropout(dropout_rate)(x_1h)
+    x_1h = layers.LSTM(48, return_sequences=False,
+                       kernel_regularizer=l2_reg)(x_1h)
+    x_1h = layers.Dropout(dropout_rate)(x_1h)
+    x_1h = layers.Dense(48, activation='relu', kernel_regularizer=l2_reg)(x_1h)
 
     # === google_trend branch ===
-    input_google_trend = layers.Input(shape=(window_google_trend, feature_google_trend), name="input_google_trend")
-    x_google_trend = layers.LSTM(64, return_sequences=True)(input_google_trend)
-    x_google_trend = layers.Dropout(0.2)(x_google_trend)
-    x_google_trend = layers.LSTM(32, return_sequences=False)(x_google_trend)
-    x_google_trend = layers.Dropout(0.2)(x_google_trend)
-    x_google_trend = layers.Dense(32, activation='relu')(x_google_trend)  # final google_trend embedding
+    input_google_trend = layers.Input(shape=(window_google_trend, feature_google_trend),
+                                      name="input_google_trend")
+    x_google_trend = layers.LSTM(96, return_sequences=True,
+                                 kernel_regularizer=l2_reg)(input_google_trend)
+    x_google_trend = layers.Dropout(dropout_rate)(x_google_trend)
+    x_google_trend = layers.LSTM(48, return_sequences=False,
+                                 kernel_regularizer=l2_reg)(x_google_trend)
+    x_google_trend = layers.Dropout(dropout_rate)(x_google_trend)
+    x_google_trend = layers.Dense(48, activation='relu',
+                                  kernel_regularizer=l2_reg)(x_google_trend)
 
     # === Santiment context (12-dim) ===
-    input_santiment = layers.Input(shape=(santiment_dim,), name="input_santiment")  
-    x_santiment = layers.Dense(32, activation='relu')(input_santiment)
-    x_santiment = layers.Dropout(0.2)(x_santiment)
-    x_santiment = layers.Dense(16, activation='relu')(x_santiment)
+    input_santiment = layers.Input(shape=(santiment_dim,), name="input_santiment")
+    x_santiment = layers.Dense(48, activation='relu', kernel_regularizer=l2_reg)(input_santiment)
+    x_santiment = layers.Dropout(dropout_rate)(x_santiment)
+    x_santiment = layers.Dense(24, activation='relu', kernel_regularizer=l2_reg)(x_santiment)
     
     # === TA context (63-dim) ===
-    input_ta = layers.Input(shape=(ta_dim,), name="input_ta")  
-    x_ta = layers.Dense(32, activation='relu')(input_ta)
-    x_ta = layers.Dropout(0.2)(x_ta)
-    x_ta = layers.Dense(16, activation='relu')(x_ta)
+    input_ta = layers.Input(shape=(ta_dim,), name="input_ta")
+    x_ta = layers.Dense(48, activation='relu', kernel_regularizer=l2_reg)(input_ta)
+    x_ta = layers.Dropout(dropout_rate)(x_ta)
+    x_ta = layers.Dense(24, activation='relu', kernel_regularizer=l2_reg)(x_ta)
 
-    # Merge the three LSTM branches + the TA context
-    merged_lstm_ta = layers.concatenate([x_5m, x_15m, x_1h, x_google_trend, x_santiment, x_ta], name="concat_lstm_ta")
+    # Merge the four LSTM branches + Santiment + TA
+    merged_lstm_ta = layers.concatenate(
+        [x_5m, x_15m, x_1h, x_google_trend, x_santiment, x_ta],
+        name="concat_lstm_ta"
+    )
 
-    # A few dense layers on that merged block
-    x = layers.Dense(64, activation='relu')(merged_lstm_ta)
-    x = layers.Dropout(0.2)(x)
-    x = layers.Dense(32, activation='relu')(x)
-    x = layers.Dropout(0.2)(x)
+    # Dense block on the merged features
+    x = layers.Dense(64, activation='relu', kernel_regularizer=l2_reg)(merged_lstm_ta)
+    x = layers.Dropout(dropout_rate)(x)
+    x = layers.Dense(32, activation='relu', kernel_regularizer=l2_reg)(x)
+    x = layers.Dropout(dropout_rate)(x)
 
     # === Final signals context (11-dim) ===
     input_signal = layers.Input(shape=(signal_dim,), name="input_signal")
-    x_sig = layers.Dense(16, activation='relu')(input_signal)
-    x_sig = layers.Dropout(0.2)(x_sig)
+    x_sig = layers.Dense(24, activation='relu', kernel_regularizer=l2_reg)(input_signal)
+    x_sig = layers.Dropout(dropout_rate)(x_sig)
 
-    # Merge the partial network x with x_sig
+    # Merge partial network x with x_sig
     x_merged_signal = layers.concatenate([x, x_sig], name="concat_signal")
 
     # Additional dense -> output
-    x2 = layers.Dense(64, activation='relu')(x_merged_signal)
-    x2 = layers.Dropout(0.2)(x2)
-    out = layers.Dense(1, activation='tanh', name="output")(x2)
+    x2 = layers.Dense(64, activation='relu', kernel_regularizer=l2_reg)(x_merged_signal)
+    x2 = layers.Dropout(dropout_rate)(x2)
+    out = layers.Dense(1, activation='tanh', name="output",
+                       kernel_regularizer=l2_reg)(x2)
 
-    # Build the model with inputs => 1 output
+    # Build the model
     model = tf.keras.Model(
-        inputs=[input_5m, input_15m, input_1h, input_google_trend, input_santiment, input_ta, input_signal],
+        inputs=[
+            input_5m, input_15m, input_1h, input_google_trend,
+            input_santiment, input_ta, input_signal
+        ],
         outputs=out
     )
-    model.compile(optimizer='adam', loss='mse')
+
+    # Use Adam with a smaller LR, e.g. 1e-4
+    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
+    model.compile(optimizer=optimizer, loss='mse')
+
     return model
 
 

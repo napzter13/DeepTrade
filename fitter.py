@@ -9,14 +9,14 @@ Extended version:
 Usage examples:
 
 1) **Train only the LSTM**:
-   python fitter.py --csv output/training_data.csv --model_out models/advanced_lstm_model.keras --epochs 600
+   python fitter.py --csv training_data/training_data.csv --model_out models/advanced_lstm_model.keras --epochs 600
 
 2) **Train LSTM + RL**:
-   python fitter.py --csv output/training_data.csv --model_out models/advanced_lstm_model.keras \
-                    --rl_csv output/rl_transitions.csv --rl_out models/rl_DQNAgent.weights.h5 --rl_epochs 5
+   python fitter.py --csv training_data/training_data.csv --model_out models/advanced_lstm_model.keras \
+                    --rl_csv training_data/rl_transitions.csv --rl_out models/rl_DQNAgent.weights.h5 --rl_epochs 5
 
 3) **Train only RL** (skip LSTM by passing a non-existent CSV or removing it):
-   python fitter.py --rl_csv output/rl_transitions.csv --rl_out models/rl_DQNAgent.weights.h5 --rl_epochs 5 --skip_lstm
+   python fitter.py --rl_csv training_data/rl_transitions.csv --rl_out models/rl_DQNAgent.weights.h5 --rl_epochs 5 --skip_lstm
 
 The RL transitions CSV must have columns:
    old_state, action, reward, new_state, done
@@ -46,12 +46,12 @@ from botlib.input_preprocessing import ModelScaler, prepare_for_model_inputs
 # Import DQNAgent for RL training (make sure we have it in botlib/rl.py)
 from botlib.rl import DQNAgent, ACTIONS
 
-RL_TRANSITIONS_FILE = os.path.join("output", "rl_transitions.csv")
+RL_TRANSITIONS_FILE = os.path.join("training_data", "rl_transitions.csv")
 
 class Trainer:
     def __init__(
         self,
-        training_csv="output/training_data.csv",
+        training_csv="training_data/training_data.csv",
         model_out="models/advanced_lstm_model.keras",
         window_5m=60,
         feature_5m=9,
@@ -301,6 +301,15 @@ class Trainer:
             self.logger.warning("No scalers found at models/scalers.pkl. Using pass-through ModelScaler.")
             model_scaler = ModelScaler()  # pass-thru
 
+        if self.apply_scaling:
+            model_scaler.fit_all(
+                X_5m_train, X_15m_train, X_1h_train,
+                X_google_trend_train, X_santiment_train,
+                X_ta_train, X_ctx_train
+            )
+        else:
+            self.logger.info("No scaling => pass-thru transforms.")
+            
         # 5) transform & optionally fit scaling
         (X_5m_train, X_15m_train, X_1h_train,
          X_google_trend_train, X_santiment_train,
@@ -327,22 +336,26 @@ class Trainer:
             model_scaler
         )
 
-        if self.apply_scaling:
-            model_scaler.fit_all(
-                X_5m_train, X_15m_train, X_1h_train,
-                X_google_trend_train, X_santiment_train,
-                X_ta_train, X_ctx_train
-            )
-        else:
-            self.logger.info("No scaling => pass-thru transforms.")
-
         # 6) Train LSTM
         early_stop = tf.keras.callbacks.EarlyStopping(
             monitor='val_loss',
-            patience=50,
+            patience=10,
             restore_best_weights=True
         )
         self.logger.info(f"Start LSTM training epochs={self.epochs}, batch_size={self.batch_size}")
+
+        # print("==== Debug Train Data ====")
+        # print("X_5m_train[0] =\n", X_5m_train[0])  # shape (60,9)
+        # print("X_15m_train[0] =\n", X_15m_train[0])  # etc.
+
+        # print("Some label samples (Y_train[:10]) =", Y_train[:10])
+        # print("Y stats => min:", np.min(Y_train), "max:", np.max(Y_train), 
+        #     "mean:", np.mean(Y_train), "std:", np.std(Y_train))
+        
+        # print("==== Debug Val Data ====")
+        # print("X_5m_val[0] =", X_5m_val[0])
+        # print("Y_val[:10]  =", Y_val[:10])
+        # print("Y_val stats => min:", np.min(Y_val), ...)
 
         self.model.fit(
             x=[
@@ -410,6 +423,7 @@ class Trainer:
 
         # Load transitions
         transitions = []
+        failed_rows = 0
         with open(rl_csv, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -434,8 +448,11 @@ class Trainer:
 
                     transitions.append((old_state_arr, action, reward, new_state_arr, done_flag))
                 except Exception as e:
-                    self.logger.warning(f"Skipping invalid RL row => {e}")
+                    failed_rows += 1
+                    # self.logger.warning(f"Skipping invalid RL row => {e}")
                     continue
+                
+        self.logger.warning(f"Skipping invalid RL rows => " + str(failed_rows))
 
         if len(transitions) < 10:
             self.logger.error("Too few RL transitions => abort RL training.")
@@ -503,7 +520,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Train multi-input timeframe LSTM from training_data.csv + optional offline RL."
     )
-    parser.add_argument("--csv", type=str, default="output/training_data.csv",
+    parser.add_argument("--csv", type=str, default="training_data/training_data.csv",
                         help="Path to training_data.csv for LSTM.")
     parser.add_argument("--model_out", type=str, default="models/advanced_lstm_model.keras",
                         help="File to save the LSTM model.")
@@ -554,3 +571,13 @@ def main():
 
 if __name__=="__main__":
     main()
+
+
+
+# python fitter.py --csv training_data/training_data_2020.csv --rl_csv training_data/rl_transitions_2020.csv
+# python fitter.py --csv training_data/training_data_2021.csv --rl_csv training_data/rl_transitions_2021.csv
+# python fitter.py --csv training_data/training_data_2022.csv --rl_csv training_data/rl_transitions_2022.csv
+# python fitter.py --csv training_data/training_data_2023.csv --rl_csv training_data/rl_transitions_2023.csv
+# python fitter.py --csv training_data/training_data_2024.csv --rl_csv training_data/rl_transitions_2024.csv
+
+# python fitter.py --csv training_data/training_data.csv --rl_csv training_data/rl_transitions.csv

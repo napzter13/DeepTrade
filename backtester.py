@@ -32,30 +32,31 @@ from botlib.environment import get_logger
 
 # --------------------------------------------------------------------------------
 # You can adjust these if you want a different exact time range:
-START_TIME = datetime.datetime(2023, 1, 1)
-END_TIME   = datetime.datetime(2024, 1, 1)  # up to but not including 2025-01-01
+START_TIME = datetime.datetime(2025, 1, 1)
+END_TIME   = datetime.datetime(2025, 2, 14)
 # --------------------------------------------------------------------------------
 
 # Create needed directories
 os.makedirs("input_cache", exist_ok=True)
 os.makedirs("output", exist_ok=True)
-os.makedirs("debug", exist_ok=True)  # for sanity-check logs
+os.makedirs("debug", exist_ok=True)
+os.makedirs("training_data", exist_ok=True)
 
 # We'll have scenario-based CSVs plus final:
 CSV_GPT1  = os.path.join("output", "backtest_result_local_gpt_1.csv")
 CSV_GPT2  = os.path.join("output", "backtest_result_local_gpt_2.csv")
 CSV_FINAL = os.path.join("output", "backtest_result_final_signal.csv")
 
-# training_data + a sanity-check file
-TRAINING_DATA_FILE = os.path.join("output", "training_data.csv")
-RL_TRANSITIONS_FILE = os.path.join("output", "rl_transitions.csv")
+# training_data
+TRAINING_DATA_FILE = os.path.join("training_data", "training_data_2025_2_14.csv")
+RL_TRANSITIONS_FILE = os.path.join("training_data", "rl_transitions_2025_2_14.csv")
 
 DO_USE_REAL_GPT = False
-DO_USE_MODEL_PRED = False
+DO_USE_MODEL_PRED = True
 BLOCK_SANTIMENT_FETCHING = True
 
 # Global concurrency variable:
-CONCURRENT_THREADS = 3
+CONCURRENT_THREADS = 2
 # We'll use a lock to prevent file write collisions:
 file_write_lock = threading.Lock()
 
@@ -264,9 +265,8 @@ class Backtester:
                 file_exists = os.path.exists(fn)
                 mode = "a" if file_exists else "w"
                 with open(fn, mode, newline="", encoding="utf-8") as f:
-                    if not file_exists:
-                        w = csv.writer(f)
-                        w.writerow(headers)
+                    w = csv.writer(f)
+                    w.writerow(headers)
 
     def init_csv_training(self):
         """
