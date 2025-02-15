@@ -89,11 +89,10 @@ class TradingBot:
 
         # Additional API keys
         self.news_api_key = os.getenv("NEWS_API_KEY", None)
-        self.binance_api_key = BINANCE_API_KEY
-        self.binance_api_secret = BINANCE_API_SECRET
 
         # Binance
-        self.binance_client = Client(self.binance_api_key, self.binance_api_secret)
+        if self.binance_client is None:
+            self.binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
         self.symbol = "BTCEUR"
 
         # Basic params

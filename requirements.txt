@@ -6,3 +6,7 @@ python-dotenv
 transformers
 openai
 scikit-learn
+python-binance
+praw
+portalocker
+pytrends

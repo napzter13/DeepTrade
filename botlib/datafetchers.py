@@ -21,7 +21,7 @@ import time
 import requests
 import praw
 import hashlib
-import fcntl
+import portalocker
 import numpy as np
 
 from binance.client import Client
@@ -107,7 +107,7 @@ def load_json_cache(filepath):
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     
     with open(lock_path, "a") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_SH)  # Shared lock for reading
+        portalocker.lock(lock_file, portalocker.LOCK_SH)  # Shared lock for reading
         if os.path.exists(filepath):
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
@@ -124,14 +124,14 @@ def save_json_cache(filepath, new_data):
       1. Acquires an exclusive lock (LOCK_EX) so only one writer at a time.
       2. Reads the existing file from disk again (while locked) to avoid losing updates from other threads.
       3. Inserts (merges) new_data into the old data—keys from new_data overwrite or add to what's there.
-         * If you only pass a single key in new_data (like {"myKey": ...}), this is a minimal overhead insertion.
+         * If we only pass a single key in new_data (like {"myKey": ...}), this is a minimal overhead insertion.
       4. Writes out the merged JSON to a temp file and uses os.replace to ensure an atomic write.
     """
     lock_path = filepath + ".lock"
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
     with open(lock_path, "a") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)  # Exclusive lock for writing
+        portalocker.lock(lock_file, portalocker.LOCK_EX)  # Exclusive lock for writing
 
         # 1) Read current on-disk data again while we hold the lock.
         old_data = {}

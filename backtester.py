@@ -25,13 +25,18 @@ import sys
 import signal
 import math
 import threading
+from binance.client import Client
 
 from botlib.tradebot import TradingBot
-from botlib.environment import PAPER_TRADING
-from botlib.environment import get_logger
+from botlib.environment import (
+    PAPER_TRADING,
+    BINANCE_API_KEY,
+    BINANCE_API_SECRET,
+    get_logger
+)
 
 # --------------------------------------------------------------------------------
-# You can adjust these if you want a different exact time range:
+# Adjust these for different exact time range:
 START_TIME = datetime.datetime(2025, 1, 1)
 END_TIME   = datetime.datetime(2025, 2, 14)
 
@@ -69,7 +74,7 @@ CSV_FINAL = os.path.join("output", "backtest_result_final_signal.csv")
 
 # We'll use a lock to prevent file write collisions:
 file_write_lock = threading.Lock()
-
+binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
 
 ###############################################################################
 # HistoricalTradingBot
@@ -81,7 +86,10 @@ class HistoricalTradingBot(TradingBot):
     caching from datafetchers.py if needed.
     """
     def __init__(self):
+        self.binance_client = binance_client
+        
         super().__init__()
+        
         # Force PAPER_TRADING
         self.simulated_balances = {"BTC": 0.0, "EUR": 10000.0}
         self.current_position = None
