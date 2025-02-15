@@ -340,14 +340,15 @@ class ModelScaler:
 
     # =========================
     # Context => 11 dims
-    #   - columns [0,1,2,3,8] => standard scaler
-    #   - columns [4,5,6,7] => clamp [-100,100] => scale => [-1,1]
+    #   - columns [0,1,2,3] => standard scaler
+    #   - columns [4,5,6,7,8] => clamp [-100,100] => scale => [-1,1]
     #   - columns [9,10] => clamp [0,1] => scale => [-1,1]
     # =========================
     def fit_ctx(self, X_ctx):
         if not hasattr(X_ctx, "shape"):
             X_ctx = np.array(X_ctx, dtype=float)
             
+        # Lazily create the context scalers if they are not already created
         if self.ctx_scaler_0 is None:
             self.ctx_scaler_0 = StandardScaler()
         if self.ctx_scaler_1 is None:
@@ -359,125 +360,96 @@ class ModelScaler:
         if self.ctx_scaler_8 is None:
             self.ctx_scaler_8 = StandardScaler()
             
-        """
-        shape => (N,11).
-        Fit 5 StandardScalers for col 0,1,2,3,8
-        """
+        # Helper function to compute a safe mean from a column:
+        def safe_mean(col):
+            m = np.nanmean(col, axis=0)
+            # If m is NaN (e.g. if col was all NaN), return 0.0
+            if np.any(np.isnan(m)):
+                m = np.array([0.0])
+            return m
+
         # For column 0:
-        col0 = X_ctx[:, 0:1]  # shape (N,1)
-        if hasattr(self.ctx_scaler_0, 'mean_'):
-            mean_val0 = self.ctx_scaler_0.mean_
-        else:
-            mean_val0 = np.nanmean(col0, axis=0)  # returns an array of shape (1,)
+        col0 = X_ctx[:, 0:1]
+        mean_val0 = safe_mean(col0)
         col0_imputed = np.where(np.isnan(col0), mean_val0, col0)
         self.ctx_scaler_0.fit(col0_imputed)
 
         # For column 1:
         col1 = X_ctx[:, 1:2]
-        if hasattr(self.ctx_scaler_1, 'mean_'):
-            mean_val1 = self.ctx_scaler_1.mean_
-        else:
-            mean_val1 = np.nanmean(col1, axis=0)
+        mean_val1 = safe_mean(col1)
         col1_imputed = np.where(np.isnan(col1), mean_val1, col1)
         self.ctx_scaler_1.fit(col1_imputed)
 
         # For column 2:
         col2 = X_ctx[:, 2:3]
-        if hasattr(self.ctx_scaler_2, 'mean_'):
-            mean_val2 = self.ctx_scaler_2.mean_
-        else:
-            mean_val2 = np.nanmean(col2, axis=0)
+        mean_val2 = safe_mean(col2)
         col2_imputed = np.where(np.isnan(col2), mean_val2, col2)
         self.ctx_scaler_2.fit(col2_imputed)
 
         # For column 3:
         col3 = X_ctx[:, 3:4]
-        if hasattr(self.ctx_scaler_3, 'mean_'):
-            mean_val3 = self.ctx_scaler_3.mean_
-        else:
-            mean_val3 = np.nanmean(col3, axis=0)
+        mean_val3 = safe_mean(col3)
         col3_imputed = np.where(np.isnan(col3), mean_val3, col3)
         self.ctx_scaler_3.fit(col3_imputed)
 
         # For column 8:
         col8 = X_ctx[:, 8:9]
-        if hasattr(self.ctx_scaler_8, 'mean_'):
-            mean_val8 = self.ctx_scaler_8.mean_
-        else:
-            mean_val8 = np.nanmean(col8, axis=0)
+        mean_val8 = safe_mean(col8)
         col8_imputed = np.where(np.isnan(col8), mean_val8, col8)
         self.ctx_scaler_8.fit(col8_imputed)
 
-
     def transform_ctx(self, arr_ctx):
         """
-        shape => (N,11).
-        - col 0 => self.ctx_scaler_0
-        - col 1 => self.ctx_scaler_1
-        - col 2 => self.ctx_scaler_2
-        - col 3 => self.ctx_scaler_3
-        - col 4..7 => clamp [-100,100] => scale => [-1,1]
-        - col 8 => self.ctx_scaler_8
-        - col 9..10 => clamp [0,1] => scale => [-1,1]
+        Expects arr_ctx of shape (N, 11). 
+        For columns 0-3 and 8, use the corresponding StandardScaler (after replacing any NaNs with the scaler’s mean).
+        For columns 4-7, clamp each value to [-100,100] and scale to [-1,1] (if NaN, output 0.0).
+        For columns 9-10, clamp each value to [0,1] and scale to [-1,1] (if NaN, output 0.0).
         """
         if arr_ctx.ndim < 2:
             arr_ctx = arr_ctx.reshape((1, -1))
-
         out = arr_ctx.copy()
         N = out.shape[0]
 
-        # columns + corresponding scaler
-        col_scalers = {
+        # For columns 0-3, use the corresponding StandardScaler.
+        col_indices_std = [0, 1, 2, 3, 8]
+        scaler_dict = {
             0: self.ctx_scaler_0,
             1: self.ctx_scaler_1,
             2: self.ctx_scaler_2,
             3: self.ctx_scaler_3,
             8: self.ctx_scaler_8,
         }
-
-        for col, scaler in col_scalers.items():
+        for col in col_indices_std:
             col_data = out[:, col]
-            # find any NaNs
-            mask_nan = np.isnan(col_data)
-            if np.any(mask_nan):
-                # replace with that scaler's mean
-                col_data[mask_nan] = scaler.mean_
-            # put back into out array
-            out[:, col] = col_data
+            # Replace any NaNs with the scaler’s mean (or 0 if mean is NaN)
+            mean_val = scaler_dict[col].mean_
+            if np.any(np.isnan(mean_val)):
+                mean_val = np.array([0.0])
+            col_data = np.where(np.isnan(col_data), mean_val, col_data)
+            # Transform the column (reshape as 2D for StandardScaler)
+            out[:, col] = scaler_dict[col].transform(col_data.reshape(-1, 1)).flatten()
 
-        # col 0 => transform with scaler_0
-        c0 = out[:, 0:1]
-        out[:, 0:1] = self.ctx_scaler_0.transform(c0)
+        # For columns 4-7: clamp to [-100,100] then scale to [-1,1].
+        for col in [4, 5, 6, 7]:
+            for n in range(N):
+                val = out[n, col]
+                if np.isnan(val):
+                    out[n, col] = 0.0
+                else:
+                    out[n, col] = clamp_and_scale(val, -100, 100)
 
-        # col 1
-        c1 = out[:, 1:2]
-        out[:, 1:2] = self.ctx_scaler_1.transform(c1)
-
-        # col 2
-        c2 = out[:, 2:3]
-        out[:, 2:3] = self.ctx_scaler_2.transform(c2)
-
-        # col 3
-        c3 = out[:, 3:4]
-        out[:, 3:4] = self.ctx_scaler_3.transform(c3)
-
-        # col 4..7 => clamp => [-100,100] => scale => [-1,1]
-        for n in range(N):
-            out[n,4] = clamp_and_scale(out[n,4], -100, 100)
-            out[n,5] = clamp_and_scale(out[n,5], -100, 100)
-            out[n,6] = clamp_and_scale(out[n,6], -100, 100)
-            out[n,7] = clamp_and_scale(out[n,7], -100, 100)
-
-        # col 8 => transform with scaler_8
-        c8 = out[:, 8:9]
-        out[:, 8:9] = self.ctx_scaler_8.transform(c8)
-
-        # col 9..10 => clamp [0,1] => scale => [-1,1]
-        for n in range(N):
-            out[n,9]  = clamp_and_scale(out[n,9], 0, 1)
-            out[n,10] = clamp_and_scale(out[n,10], 0, 1)
+        # For columns 9 and 10: clamp to [0,1] then scale to [-1,1].
+        for col in [9, 10]:
+            for n in range(N):
+                val = out[n, col]
+                if np.isnan(val):
+                    out[n, col] = 0.0
+                else:
+                    out[n, col] = clamp_and_scale(val, 0, 1)
 
         return out
+
+
 
     # =========================
     # Save / Load
@@ -526,10 +498,24 @@ def prepare_for_model_inputs(
     Convenience function to transform all five inputs with the given model_scaler.
     """
     s_5m  = model_scaler.transform_5m(arr_5m)
+    print("transformed s_5m => mean:", np.mean(s_5m), "std:", np.std(s_5m))
+    print("any NaN or Inf =>", np.any(np.isnan(s_5m)), np.any(np.isinf(s_5m)))
     s_15m = model_scaler.transform_15m(arr_15m)
+    print("transformed s_15m => mean:", np.mean(s_15m), "std:", np.std(s_15m))
+    print("any NaN or Inf =>", np.any(np.isnan(s_15m)), np.any(np.isinf(s_15m)))
     s_1h  = model_scaler.transform_1h(arr_1h)
+    print("transformed s_1h => mean:", np.mean(s_1h), "std:", np.std(s_1h))
+    print("any NaN or Inf =>", np.any(np.isnan(s_1h)), np.any(np.isinf(s_1h)))
     s_gt  = model_scaler.transform_google_trend(arr_google_trend)
+    print("transformed s_gt => mean:", np.mean(s_gt), "std:", np.std(s_gt))
+    print("any NaN or Inf =>", np.any(np.isnan(s_gt)), np.any(np.isinf(s_gt)))
     s_sa  = model_scaler.transform_santiment(arr_santiment)
+    print("transformed s_sa => mean:", np.mean(s_sa), "std:", np.std(s_sa))
+    print("any NaN or Inf =>", np.any(np.isnan(s_sa)), np.any(np.isinf(s_sa)))
     s_ta  = model_scaler.transform_ta(arr_ta)
+    print("transformed s_ta => mean:", np.mean(s_ta), "std:", np.std(s_ta))
+    print("any NaN or Inf =>", np.any(np.isnan(s_ta)), np.any(np.isinf(s_ta)))
     s_ctx = model_scaler.transform_ctx(arr_ctx)
+    print("transformed s_ctx => mean:", np.mean(s_ctx), "std:", np.std(s_ctx))
+    print("any NaN or Inf =>", np.any(np.isnan(s_ctx)), np.any(np.isinf(s_ctx)))
     return s_5m, s_15m, s_1h, s_gt, s_sa, s_ta, s_ctx

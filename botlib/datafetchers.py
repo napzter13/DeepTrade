@@ -21,6 +21,7 @@ import time
 import requests
 import praw
 import hashlib
+import fcntl
 import numpy as np
 
 from binance.client import Client
@@ -97,23 +98,64 @@ def compute_average_sentiment(texts):
 
 # Utility: load/save JSON
 def load_json_cache(filepath):
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"Could not parse {filepath}: {e}")
+    """
+    Loads the JSON cache file in a thread-safe way:
+      - Acquires a shared lock (LOCK_SH) so multiple readers can read concurrently.
+      - Returns {} if the file doesn't exist or can't be parsed.
+    """
+    lock_path = filepath + ".lock"
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    
+    with open(lock_path, "a") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_SH)  # Shared lock for reading
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"Could not parse {filepath}: {e}")
+                return {}
+        else:
             return {}
-    else:
-        return {}
 
-def save_json_cache(filepath, data):
-    try:
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        logger.error(f"Could not write cache to {filepath}: {e}")
+def save_json_cache(filepath, new_data):
+    """
+    Saves new_data into the JSON cache file in a thread-safe, atomic manner:
+      1. Acquires an exclusive lock (LOCK_EX) so only one writer at a time.
+      2. Reads the existing file from disk again (while locked) to avoid losing updates from other threads.
+      3. Inserts (merges) new_data into the old data—keys from new_data overwrite or add to what's there.
+         * If you only pass a single key in new_data (like {"myKey": ...}), this is a minimal overhead insertion.
+      4. Writes out the merged JSON to a temp file and uses os.replace to ensure an atomic write.
+    """
+    lock_path = filepath + ".lock"
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+
+    with open(lock_path, "a") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)  # Exclusive lock for writing
+
+        # 1) Read current on-disk data again while we hold the lock.
+        old_data = {}
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    old_data = json.load(f)
+            except Exception as e:
+                logger.warning(f"Could not parse {filepath} before saving: {e}")
+
+        # 2) Insert new_data into old_data (avoiding large merges if new_data is only 1 key).
+        #    If new_data = {"newKey": ...}, then only that one key is updated.
+        old_data.update(new_data)
+
+        # 3) Write to a temp file, then atomically replace the original.
+        tmp_filepath = filepath + ".tmp"
+        try:
+            with open(tmp_filepath, "w", encoding="utf-8") as f:
+                json.dump(old_data, f, indent=2)
+            os.replace(tmp_filepath, filepath)
+        except Exception as e:
+            logger.error(f"Could not write cache to {filepath}: {e}")
+    # Lock is released on exit
+
 
 ###############################################################################
 # Utility: For fetch_order_book & fetch_reddit_sentiment "nearest hour" approach
@@ -223,8 +265,7 @@ def get_klines(
         cleaned_kline = [float(kline[i]) for i in indexes_to_keep]
         cleaned_data.append(cleaned_kline)
 
-    cache_dict[key] = cleaned_data
-    save_json_cache(cache_file, cache_dict)
+    save_json_cache(cache_file, {key: cleaned_data})
     return cleaned_data
 
 
@@ -262,9 +303,6 @@ def fetch_price_at_hour(binance_client: Client, symbol="BTCEUR", dt: datetime.da
         except Exception as e:
             logger.error(f"Error fetching live ticker: {e}")
             return np.nan
-        cache_dict[key] = val
-        save_json_cache(cache_file, cache_dict)
-        return val
     else:
         # dt more than 1h ago => fetch 1h kline
         try:
@@ -285,9 +323,8 @@ def fetch_price_at_hour(binance_client: Client, symbol="BTCEUR", dt: datetime.da
             logger.error(f"Error fetching historical klines: {e}")
             return np.nan
 
-        cache_dict[key] = val
-        save_json_cache(cache_file, cache_dict)
-        return val
+    save_json_cache(cache_file, {key: val})
+    return val
 
 
 ###############################################################################
@@ -372,8 +409,8 @@ def fetch_order_book(binance_client: Client,
                 "bids": bids,
                 "asks": asks
             }
-        cache_data[newkey] = result
-        save_json_cache(cache_file, cache_data)
+        
+        save_json_cache(cache_file, {newkey: result})
         return result
     except Exception as e:
         logger.error(f"Order book error: {e}")
@@ -431,8 +468,7 @@ def fetch_news_data(days=1, end_dt=None):
             logger.error(f"News fetch error: {e}")
             articles = []
 
-    cache_dict[key] = articles
-    save_json_cache(cache_file, cache_dict)
+    save_json_cache(cache_file, {key: articles})
     return articles
 
 
@@ -499,8 +535,7 @@ def fetch_google_trends(end_dt=None, max_retries=1, delay=5, days=7):
                     daily_values.append(float(df.loc[dt, "Bitcoin"]))
                 # If caching is enabled (end_dt provided), store the array.
                 if key is not None:
-                    cache_dict[key] = daily_values
-                    save_json_cache(cache_file, cache_dict)
+                    save_json_cache(cache_file, {key: daily_values})
                     logger.info(f"[fetch_google_trends] Stored daily values for key={key} with {len(daily_values)} points.")
                 return daily_values
             else:
@@ -622,8 +657,7 @@ def fetch_santiment_data(end_dt=None, only_look_in_cache = False):
                 if np.isnan(cached_results[metric]):
                     cached_results[metric] = "Null"
                     
-            cache_dict[key] = cached_results
-            save_json_cache(cache_file, cached_results)
+            save_json_cache(cache_file, {key: cached_results})
             
         except Exception as e:
             # Check for rate-limiting (HTTP 429)
@@ -702,8 +736,7 @@ def fetch_reddit_sentiment(dt: datetime.datetime = None):
             logger.error(f"Reddit API error: {e}")
             avg_sent = 0.0
 
-    cache_data[newkey] = avg_sent
-    save_json_cache(cache_file, cache_data)
+    save_json_cache(cache_file, {newkey: avg_sent})
     return avg_sent
 
 def analyze_news_sentiment(news_articles):
@@ -741,7 +774,6 @@ def analyze_news_sentiment(news_articles):
     avg_sentiment = compute_average_sentiment(text_list)
 
     # 5) Store in cache
-    cache_data[articles_hash] = avg_sentiment
-    save_json_cache(NEWS_ANALYZE_CACHE_FILE, cache_data)
+    save_json_cache(NEWS_ANALYZE_CACHE_FILE, {articles_hash: avg_sentiment})
 
     return avg_sentiment

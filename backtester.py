@@ -34,13 +34,20 @@ from botlib.environment import get_logger
 # You can adjust these if you want a different exact time range:
 START_TIME = datetime.datetime(2025, 1, 1)
 END_TIME   = datetime.datetime(2025, 2, 14)
+
+## LAST TRAINING_DATA:
+# START_TIME = datetime.datetime(2025, 1, 1)
+# END_TIME   = datetime.datetime(2025, 2, 14)
 # --------------------------------------------------------------------------------
 
 # Global concurrency variable:
+## Setting this value above 1 is only to collect a bunch of training_data.
+## It cannot be used for backtesting to output csv files.
 CONCURRENT_THREADS = 1
 
 DO_USE_REAL_GPT = False
 DO_USE_MODEL_PRED = True
+MAKE_TRAINING_DATA = False
 BLOCK_SANTIMENT_FETCHING = True
 
 
@@ -49,6 +56,7 @@ os.makedirs("input_cache", exist_ok=True)
 os.makedirs("output", exist_ok=True)
 os.makedirs("debug", exist_ok=True)
 os.makedirs("training_data", exist_ok=True)
+
 
 # training_data
 TRAINING_DATA_FILE = os.path.join("training_data", "training_data_{:%Y_%m_%d}.csv".format(END_TIME))
@@ -218,13 +226,6 @@ class Backtester:
     def __init__(self, start_time=None, end_time=None):
         self.logger = get_logger("Backtester")
 
-        # RL Transitions
-        with file_write_lock:
-            if not os.path.exists(RL_TRANSITIONS_FILE):
-                with open(RL_TRANSITIONS_FILE, "w", encoding="utf-8", newline="") as f:
-                    w = csv.writer(f)
-                    w.writerow(["old_state","action","reward","new_state","done"])
-
         # Our specialized historical bot
         self.bot = HistoricalTradingBot()
         self.bot.logger = self.logger
@@ -241,7 +242,8 @@ class Backtester:
 
         # CSV init
         self.init_csv_scenarios()
-        self.init_csv_training()
+        if MAKE_TRAINING_DATA:
+            self.init_csv_training()
 
         # Buffer for training
         self.feature_buffer = {}
@@ -289,6 +291,13 @@ class Backtester:
                         "arr_ta_63", "arr_ctx_11",
                         "y"
                     ])
+        
+            # RL Transitions
+            if not os.path.exists(RL_TRANSITIONS_FILE):
+                with open(RL_TRANSITIONS_FILE, "w", encoding="utf-8", newline="") as f:
+                    w = csv.writer(f)
+                    w.writerow(["old_state","action","reward","new_state","done"])
+                    
 
     def run_backtest(self):
         self.logger.info(
@@ -314,16 +323,17 @@ class Backtester:
                 done = False
 
                 if old_state_vec is not None and next_state_vec is not None:
-                    with file_write_lock:
-                        with open(RL_TRANSITIONS_FILE, "a", encoding="utf-8", newline="") as f:
-                            w = csv.writer(f)
-                            w.writerow([
-                                json.dumps(old_state_vec.tolist()),
-                                action,
-                                reward,
-                                json.dumps(next_state_vec.tolist()),
-                                int(done)
-                            ])
+                    if MAKE_TRAINING_DATA:
+                        with file_write_lock:
+                            with open(RL_TRANSITIONS_FILE, "a", encoding="utf-8", newline="") as f:
+                                w = csv.writer(f)
+                                w.writerow([
+                                    json.dumps(old_state_vec.tolist()),
+                                    action,
+                                    reward,
+                                    json.dumps(next_state_vec.tolist()),
+                                    int(done)
+                                ])
 
             self.current_time += datetime.timedelta(hours=1)
             self.prev_iteration_data = iteration_data
@@ -366,20 +376,21 @@ class Backtester:
             else:
                 ratio = 0.0
 
-            with file_write_lock:
-                with open(TRAINING_DATA_FILE, "a", newline="", encoding="utf-8") as f:
-                    w = csv.writer(f)
-                    w.writerow([
-                        dt_ago_str,
-                        oldrow["arr_5m"],
-                        oldrow["arr_15m"],
-                        oldrow["arr_1h"],
-                        oldrow["arr_google_trend"],
-                        oldrow["arr_santiment"],
-                        oldrow["arr_ta_63"],
-                        oldrow["arr_ctx_11"],
-                        f"{ratio:.4f}"
-                    ])
+            if MAKE_TRAINING_DATA:
+                with file_write_lock:
+                    with open(TRAINING_DATA_FILE, "a", newline="", encoding="utf-8") as f:
+                        w = csv.writer(f)
+                        w.writerow([
+                            dt_ago_str,
+                            oldrow["arr_5m"],
+                            oldrow["arr_15m"],
+                            oldrow["arr_1h"],
+                            oldrow["arr_google_trend"],
+                            oldrow["arr_santiment"],
+                            oldrow["arr_ta_63"],
+                            oldrow["arr_ctx_11"],
+                            f"{ratio:.4f}"
+                        ])
 
             # Remove that entry from buffer so it doesn't get reused
             del self.feature_buffer[dt_ago_str]
