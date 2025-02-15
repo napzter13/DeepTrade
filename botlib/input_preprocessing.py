@@ -123,76 +123,132 @@ class ModelScaler:
     # Time-series
     # =========================
     def fit_5m(self, X_5m):
+        # Lazily create the scaler if none
+        if self.scaler_5m is None:
+            self.scaler_5m = StandardScaler()
+        # Ensure it's an array
+        if not hasattr(X_5m, "shape"):
+            X_5m = np.array(X_5m, dtype=float)
+        if len(X_5m.shape) == 1:
+            # reshape (N,) => (N,60,1) if needed
+            X_5m = X_5m.reshape(-1, 60, 1)
+            
+        N, T, D = X_5m.shape
+        flatten = X_5m.reshape((N * T, D))
+        
+        # If this scaler is already fit, we can use its .mean_, else compute from data.
+        if hasattr(self.scaler_5m, 'mean_'):
+            mean_val = self.scaler_5m.mean_
+        else:
+            mean_val = np.nanmean(flatten, axis=0)  # shape (D,)
+
+        # Replace any NaNs with the mean
+        flatten = np.where(np.isnan(flatten), mean_val, flatten)
+
+        # Finally fit
+        self.scaler_5m.fit(flatten)
+
+    def transform_5m(self, X_5m):
         if not hasattr(X_5m, "shape"):
             X_5m = np.array(X_5m, dtype=float)
         if len(X_5m.shape) == 1:
             X_5m = X_5m.reshape(-1, 60, 1)
-            
-        N,T,D = X_5m.shape
-        flatten = X_5m.reshape((N*T, D))
-        self.scaler_5m.fit(flatten)
 
-    def transform_5m(self, X_5m):
-        if self.scaler_5m is None:
-            self.scaler_5m = StandardScaler()
-            self.fit_5m(X_5m.copy())
-        N,T,D = X_5m.shape
-        flatten = X_5m.reshape((N*T, D))
+        N, T, D = X_5m.shape
+        flatten = X_5m.reshape((N * T, D))
+
+        # Impute NaNs with the scaler's existing mean_
+        flatten = np.where(np.isnan(flatten), self.scaler_5m.mean_, flatten)
+
         out = self.scaler_5m.transform(flatten)
-        return out.reshape((N,T,D))
+        return out.reshape((N, T, D))
+
 
     def fit_15m(self, X_15m):
+        if self.scaler_15m is None:
+            self.scaler_15m = StandardScaler()
         if not hasattr(X_15m, "shape"):
             X_15m = np.array(X_15m, dtype=float)
         if len(X_15m.shape) == 1:
             X_15m = X_15m.reshape(-1, 60, 1)
             
-        N,T,D = X_15m.shape
-        flatten = X_15m.reshape((N*T, D))
+        N, T, D = X_15m.shape
+        flatten = X_15m.reshape((N * T, D))
+
+        if hasattr(self.scaler_15m, 'mean_'):
+            mean_val = self.scaler_15m.mean_
+        else:
+            mean_val = np.nanmean(flatten, axis=0)
+        flatten = np.where(np.isnan(flatten), mean_val, flatten)
+
         self.scaler_15m.fit(flatten)
 
     def transform_15m(self, X_15m):
-        if self.scaler_15m is None:
-            self.scaler_15m = StandardScaler()
-            self.fit_15m(X_15m.copy())
-        N,T,D = X_15m.shape
-        flatten = X_15m.reshape((N*T, D))
+        if not hasattr(X_15m, "shape"):
+            X_15m = np.array(X_15m, dtype=float)
+        if len(X_15m.shape) == 1:
+            X_15m = X_15m.reshape(-1, 60, 1)
+
+        N, T, D = X_15m.shape
+        flatten = X_15m.reshape((N * T, D))
+
+        flatten = np.where(np.isnan(flatten), self.scaler_15m.mean_, flatten)
         out = self.scaler_15m.transform(flatten)
-        return out.reshape((N,T,D))
+        return out.reshape((N, T, D))
+
 
     def fit_1h(self, X_1h):
+        if self.scaler_1h is None:
+            self.scaler_1h = StandardScaler()
         if not hasattr(X_1h, "shape"):
             X_1h = np.array(X_1h, dtype=float)
         if len(X_1h.shape) == 1:
             X_1h = X_1h.reshape(-1, 60, 1)
             
-        N,T,D = X_1h.shape
-        flatten = X_1h.reshape((N*T, D))
+        N, T, D = X_1h.shape
+        flatten = X_1h.reshape((N * T, D))
+
+        if hasattr(self.scaler_1h, 'mean_'):
+            mean_val = self.scaler_1h.mean_
+        else:
+            mean_val = np.nanmean(flatten, axis=0)
+        flatten = np.where(np.isnan(flatten), mean_val, flatten)
+
         self.scaler_1h.fit(flatten)
 
     def transform_1h(self, X_1h):
-        if self.scaler_1h is None:
-            self.scaler_1h = StandardScaler()
-            self.fit_1h(X_1h.copy())
-        N,T,D = X_1h.shape
-        flatten = X_1h.reshape((N*T, D))
+        if not hasattr(X_1h, "shape"):
+            X_1h = np.array(X_1h, dtype=float)
+        if len(X_1h.shape) == 1:
+            X_1h = X_1h.reshape(-1, 60, 1)
+
+        N, T, D = X_1h.shape
+        flatten = X_1h.reshape((N * T, D))
+
+        flatten = np.where(np.isnan(flatten), self.scaler_1h.mean_, flatten)
         out = self.scaler_1h.transform(flatten)
-        return out.reshape((N,T,D))
+        return out.reshape((N, T, D))
+
 
     def fit_google_trend(self, X_google_trend):
+        if self.scaler_google_trend is None:
+            self.scaler_google_trend = StandardScaler()
         if not hasattr(X_google_trend, "shape"):
             X_google_trend = np.array(X_google_trend, dtype=float)
         if len(X_google_trend.shape) == 1:
             X_google_trend = X_google_trend.reshape(-1, 8, 1)
-            
-        N,T,D = X_google_trend.shape
+                
+        N, T, D = X_google_trend.shape
         flatten = X_google_trend.reshape((N*T, D))
+        # Use the scaler's mean if it exists; otherwise, compute it manually ignoring NaNs.
+        if hasattr(self.scaler_google_trend, 'mean_'):
+            mean_value = self.scaler_google_trend.mean_
+        else:
+            mean_value = np.nanmean(flatten, axis=0)  # shape: (D,)
+        flatten = np.where(np.isnan(flatten), mean_value, flatten)
         self.scaler_google_trend.fit(flatten)
         
     def transform_google_trend(self, X_google_trend):
-        if self.scaler_google_trend is None:
-            self.scaler_google_trend = StandardScaler()
-            self.fit_google_trend(X_google_trend.copy())
         N,T,D = X_google_trend.shape
         flatten = X_google_trend.reshape((N*T, D))
         flatten = np.where(np.isnan(flatten), self.scaler_google_trend.mean_, flatten)
@@ -211,10 +267,22 @@ class ModelScaler:
         
         N, D = X_santiment.shape
         
+        # Lazily initialize if needed
+        if self.scalers_santiment is None:
+            self.scalers_santiment = [StandardScaler() for _ in range(D)]
+            
         # Fit each scaler to the corresponding column
         for i in range(D):
             col_i = X_santiment[:, i:i+1]  # shape (N,1)
-            self.scalers_santiment[i].fit(col_i)
+            # If the scaler has already been fit, use its mean;
+            # otherwise compute the mean manually ignoring NaNs.
+            if hasattr(self.scalers_santiment[i], 'mean_'):
+                mean_val = self.scalers_santiment[i].mean_
+            else:
+                mean_val = np.nanmean(col_i, axis=0)  # shape (1,)
+            col_imputed = np.where(np.isnan(col_i), mean_val, col_i)
+            self.scalers_santiment[i].fit(col_imputed)
+
 
     def transform_santiment(self, X_santiment):       
         # Ensure 2D
@@ -222,12 +290,6 @@ class ModelScaler:
             X_santiment = np.array(X_santiment, dtype=float)
         if X_santiment.ndim < 2:
             X_santiment = X_santiment.reshape((1, -1))
-        
-        # Lazily initialize if needed
-        if self.scalers_santiment is None:
-            _, D = X_santiment.shape
-            self.scalers_santiment = [StandardScaler() for _ in range(D)]
-            self.fit_santiment(X_santiment.copy())
 
         N, D = X_santiment.shape
         X_transformed = np.empty_like(X_santiment, dtype=float)
@@ -253,21 +315,20 @@ class ModelScaler:
     # TA => 63 separate MinMaxScalers
     # =========================
     def fit_ta(self, X_ta):
+        N, D = X_ta.shape
+        if self.ta_scalers is None:
+            self.ta_scalers = [MinMaxScaler(feature_range=(-1,1)) for _ in range(D)]
         if not hasattr(X_ta, "shape"):
             X_ta = np.array(X_ta, dtype=float)
         if len(X_ta.shape) == 1:
             X_ta = X_ta.reshape(-1, 1)
             
-        N, D = X_ta.shape
         for i in range(D):
             col_i = X_ta[:, i:i+1]  # shape (N,1)
             self.ta_scalers[i].fit(col_i)
 
     def transform_ta(self, arr_ta):
         N, D = arr_ta.shape
-        if self.ta_scalers is None:
-            self.ta_scalers = [MinMaxScaler(feature_range=(-1,1)) for _ in range(D)]
-            self.fit_ta(arr_ta.copy())
         if arr_ta.ndim < 2:
             arr_ta = arr_ta.reshape((1, -1))
 
@@ -286,24 +347,67 @@ class ModelScaler:
     def fit_ctx(self, X_ctx):
         if not hasattr(X_ctx, "shape"):
             X_ctx = np.array(X_ctx, dtype=float)
+            
+        if self.ctx_scaler_0 is None:
+            self.ctx_scaler_0 = StandardScaler()
+        if self.ctx_scaler_1 is None:
+            self.ctx_scaler_1 = StandardScaler()
+        if self.ctx_scaler_2 is None:
+            self.ctx_scaler_2 = StandardScaler()
+        if self.ctx_scaler_3 is None:
+            self.ctx_scaler_3 = StandardScaler()
+        if self.ctx_scaler_8 is None:
+            self.ctx_scaler_8 = StandardScaler()
+            
         """
         shape => (N,11).
         Fit 5 StandardScalers for col 0,1,2,3,8
         """
-        col0 = X_ctx[:, 0:1]
-        self.ctx_scaler_0.fit(col0)
+        # For column 0:
+        col0 = X_ctx[:, 0:1]  # shape (N,1)
+        if hasattr(self.ctx_scaler_0, 'mean_'):
+            mean_val0 = self.ctx_scaler_0.mean_
+        else:
+            mean_val0 = np.nanmean(col0, axis=0)  # returns an array of shape (1,)
+        col0_imputed = np.where(np.isnan(col0), mean_val0, col0)
+        self.ctx_scaler_0.fit(col0_imputed)
 
+        # For column 1:
         col1 = X_ctx[:, 1:2]
-        self.ctx_scaler_1.fit(col1)
+        if hasattr(self.ctx_scaler_1, 'mean_'):
+            mean_val1 = self.ctx_scaler_1.mean_
+        else:
+            mean_val1 = np.nanmean(col1, axis=0)
+        col1_imputed = np.where(np.isnan(col1), mean_val1, col1)
+        self.ctx_scaler_1.fit(col1_imputed)
 
+        # For column 2:
         col2 = X_ctx[:, 2:3]
-        self.ctx_scaler_2.fit(col2)
+        if hasattr(self.ctx_scaler_2, 'mean_'):
+            mean_val2 = self.ctx_scaler_2.mean_
+        else:
+            mean_val2 = np.nanmean(col2, axis=0)
+        col2_imputed = np.where(np.isnan(col2), mean_val2, col2)
+        self.ctx_scaler_2.fit(col2_imputed)
 
+        # For column 3:
         col3 = X_ctx[:, 3:4]
-        self.ctx_scaler_3.fit(col3)
+        if hasattr(self.ctx_scaler_3, 'mean_'):
+            mean_val3 = self.ctx_scaler_3.mean_
+        else:
+            mean_val3 = np.nanmean(col3, axis=0)
+        col3_imputed = np.where(np.isnan(col3), mean_val3, col3)
+        self.ctx_scaler_3.fit(col3_imputed)
 
+        # For column 8:
         col8 = X_ctx[:, 8:9]
-        self.ctx_scaler_8.fit(col8)
+        if hasattr(self.ctx_scaler_8, 'mean_'):
+            mean_val8 = self.ctx_scaler_8.mean_
+        else:
+            mean_val8 = np.nanmean(col8, axis=0)
+        col8_imputed = np.where(np.isnan(col8), mean_val8, col8)
+        self.ctx_scaler_8.fit(col8_imputed)
+
 
     def transform_ctx(self, arr_ctx):
         """
@@ -322,18 +426,6 @@ class ModelScaler:
         out = arr_ctx.copy()
         N = out.shape[0]
 
-        if self.ctx_scaler_0 is None:
-            self.ctx_scaler_0 = StandardScaler()
-        if self.ctx_scaler_1 is None:
-            self.ctx_scaler_1 = StandardScaler()
-        if self.ctx_scaler_2 is None:
-            self.ctx_scaler_2 = StandardScaler()
-        if self.ctx_scaler_3 is None:
-            self.ctx_scaler_3 = StandardScaler()
-        if self.ctx_scaler_8 is None:
-            self.ctx_scaler_8 = StandardScaler()
-            self.fit_ctx(arr_ctx.copy())
-
         # columns + corresponding scaler
         col_scalers = {
             0: self.ctx_scaler_0,
@@ -349,8 +441,7 @@ class ModelScaler:
             mask_nan = np.isnan(col_data)
             if np.any(mask_nan):
                 # replace with that scaler's mean
-                mean_val = scaler.mean_[0]  # StandardScaler stores means in .mean_
-                col_data[mask_nan] = mean_val
+                col_data[mask_nan] = scaler.mean_
             # put back into out array
             out[:, col] = col_data
 

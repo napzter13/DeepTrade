@@ -1,0 +1,8 @@
+tensorflow-gpu==2.6
+keras==2.6
+schedule
+nltk
+python-dotenv
+transformers
+openai
+scikit-learn
