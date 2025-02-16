@@ -8,13 +8,13 @@ backtester.py
    2) We run the normal TradingBot logic => produce last_log_data (including signals).
    3) We store those signals in scenario-based CSV logs.
    4) We also buffer that iteration's multi-input feature arrays for building the training_data
-      after +3h price is known. (For advanced LSTM model.)
+      after +Xh price is known. (For advanced LSTM model.)
 
 At the end:
 - We have 4 scenario-based CSVs (local_gpt_1, local_gpt_2, final_signal).
 - We also produce "training_data.csv" with columns:
   [timestamp, arr_5m, arr_15m, arr_1h, arr_google_trend, arr_santiment, arr_ta_63, arr_ctx_11, y]
-  where y is the future price %change after +3h, clamped to [-1,1].
+  where y is the future price %change after +Xh, clamped to [-1,1].
 """
 
 import os
@@ -34,6 +34,8 @@ from botlib.environment import (
     BINANCE_API_SECRET,
     get_logger
 )
+
+Y_HOURS_IN_THE_FUTURE = 3
 
 # --------------------------------------------------------------------------------
 # Adjust these for different exact time range:
@@ -258,7 +260,7 @@ class Backtester:
         # Buffer for training
         self.feature_buffer = {}
 
-        # 3 local scenarios + final
+        # Local scenarios + final
         self.scenarios = {
             "local_gpt_1":  {"equity": 10000.0, "position": "NONE", "entry_price": None},
             "local_gpt_2":  {"equity": 10000.0, "position": "NONE", "entry_price": None},
@@ -350,7 +352,7 @@ class Backtester:
 
     def handle_training_buffer(self, iteration_data):
         """
-        Store each iteration's data => after +3h, we get the actual future price,
+        Store each iteration's data => after +Xh, we get the actual future price,
         then we log that row to training_data.csv for supervised LSTM fitting.
         """
         now_ts = self.current_time.replace(minute=0, second=0, microsecond=0)
@@ -368,8 +370,8 @@ class Backtester:
         }
         self.feature_buffer[now_str] = rowdict
 
-        # Check data from 3h ago => compute future price change => log
-        dt_ago = now_ts - datetime.timedelta(hours=3)
+        # Check data from Xh ago => compute future price change => log
+        dt_ago = now_ts - datetime.timedelta(hours=Y_HOURS_IN_THE_FUTURE)
         dt_ago_str = dt_ago.strftime("%Y-%m-%d %H:%M")
 
         if dt_ago_str in self.feature_buffer:
