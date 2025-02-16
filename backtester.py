@@ -35,7 +35,7 @@ from botlib.environment import (
     get_logger
 )
 
-Y_HOURS_IN_THE_FUTURE = 3
+Y_STEPS_IN_THE_FUTURE = 3
 
 # --------------------------------------------------------------------------------
 # Adjust these for different exact time range:
@@ -46,7 +46,7 @@ END_TIME   = datetime.datetime(2025, 1, 1)
 # Global concurrency variable:
 ## Setting this value above 1 is only to collect a bunch of training_data.
 ## It cannot be used for backtesting to output csv files.
-CONCURRENT_THREADS = 5
+CONCURRENT_THREADS = 3
 
 DO_USE_REAL_GPT = False
 DO_USE_MODEL_PRED = False
@@ -235,7 +235,7 @@ class HistoricalTradingBot(TradingBot):
 # Backtester
 ###############################################################################
 class Backtester:
-    def __init__(self, start_time=None, end_time=None):
+    def __init__(self, start_time=None, end_time=None, skip_until=None):
         self.logger = get_logger("Backtester")
 
         # Our specialized historical bot
@@ -248,7 +248,8 @@ class Backtester:
         # If start_time/end_time are provided, use them; otherwise fallback
         self.start_time = start_time if start_time else START_TIME
         self.end_time   = end_time   if end_time   else END_TIME
-
+        self.skip_until = skip_until
+        
         # Floor to the hour
         self.current_time = self.start_time.replace(minute=0, second=0, microsecond=0)
 
@@ -279,8 +280,7 @@ class Backtester:
             # If the file doesn't exist, write header. Otherwise, append
             for fn in [CSV_GPT1, CSV_GPT2, CSV_FINAL]:
                 file_exists = os.path.exists(fn)
-                mode = "a" if file_exists else "w"
-                with open(fn, mode, newline="", encoding="utf-8") as f:
+                with open(fn, "w", newline="", encoding="utf-8") as f:
                     w = csv.writer(f)
                     w.writerow(headers)
 
@@ -323,7 +323,8 @@ class Backtester:
                 # LSTM training data
                 self.handle_training_buffer(iteration_data)
                 # Scenario-based CSV logs
-                self.handle_scenarios(iteration_data)
+                if CONCURRENT_THREADS == 1:
+                    self.handle_scenarios(iteration_data)
 
                 # RL transitions
                 old_state_vec = iteration_data.get("old_rl_state", None)
@@ -356,6 +357,9 @@ class Backtester:
         then we log that row to training_data.csv for supervised LSTM fitting.
         """
         now_ts = self.current_time.replace(minute=0, second=0, microsecond=0)
+        if self.skip_until and now_ts < self.skip_until:
+            return
+        
         now_str = now_ts.strftime("%Y-%m-%d %H:%M")
 
         rowdict = {
@@ -371,7 +375,7 @@ class Backtester:
         self.feature_buffer[now_str] = rowdict
 
         # Check data from Xh ago => compute future price change => log
-        dt_ago = now_ts - datetime.timedelta(hours=Y_HOURS_IN_THE_FUTURE)
+        dt_ago = now_ts - datetime.timedelta(hours=Y_STEPS_IN_THE_FUTURE)
         dt_ago_str = dt_ago.strftime("%Y-%m-%d %H:%M")
 
         if dt_ago_str in self.feature_buffer:
@@ -531,49 +535,56 @@ class Backtester:
         sys.exit(0)
 
 
-def run_thread_chunk(thread_id, start_dt, end_dt):
-    """
-    Each thread runs its own Backtester over a portion of the time range.
-    NOTE: We do not call signal.signal(...) here because Python only
-    allows that in the main thread.
-    """
-    backtester = Backtester(start_time=start_dt, end_time=end_dt)
-    backtester.logger.info(f"Thread {thread_id} => chunk: {start_dt} to {end_dt}")
+def run_thread_chunk(thread_id, start_dt, end_dt, skip_until):
+    backtester = Backtester(
+        start_time=start_dt,
+        end_time=end_dt,
+        skip_until=skip_until
+    )
+    backtester.logger.info(f"[Thread {thread_id}] range: {start_dt} to {end_dt}, skip_until={skip_until}")
     backtester.run_backtest()
-
+    
 
 def main():
-    # Handle Ctrl+C in main thread
     def handle_main_ctrl_c(sig, frame):
         print("=== Ctrl+C intercepted (main thread) => exiting ===")
         sys.exit(0)
     signal.signal(signal.SIGINT, handle_main_ctrl_c)
 
-    os.system('cls' if os.name == 'nt' else 'clear')  # clear terminal on Windows/*nix
+    os.system('cls' if os.name == 'nt' else 'clear')  # optional: clear terminal
 
-    # Calculate total hours in the range
     total_hours = int((END_TIME - START_TIME).total_seconds() // 3600)
     if total_hours <= 0:
-        # Fallback if date range is invalid or zero
         backtester = Backtester()
         backtester.run_backtest()
         return
 
-    # Divide time range among CONCURRENT_THREADS
     chunk_size = math.ceil(total_hours / CONCURRENT_THREADS)
     threads = []
 
     for i in range(CONCURRENT_THREADS):
         chunk_start = START_TIME + datetime.timedelta(hours=(i * chunk_size))
-        chunk_end   = START_TIME + datetime.timedelta(hours=((i+1) * chunk_size))
+        chunk_end   = START_TIME + datetime.timedelta(hours=((i + 1) * chunk_size))
+
+        # If not the last chunk => overlap by +Xh
+        if i < CONCURRENT_THREADS - 1:
+            chunk_end += datetime.timedelta(hours=Y_STEPS_IN_THE_FUTURE)
+
         if chunk_start >= END_TIME:
             break
         if chunk_end > END_TIME:
             chunk_end = END_TIME
 
+        # We'll skip training-data writes for the first Xh of chunk i+1
+        # so chunk i's final Xh doesn't get duplicated
+        skip_until = None
+        if i > 0:
+            # For chunk i>0, skip writing data until chunk_start + Xh
+            skip_until = chunk_start + datetime.timedelta(hours=Y_STEPS_IN_THE_FUTURE)
+
         t = threading.Thread(
             target=run_thread_chunk,
-            args=(i, chunk_start, chunk_end),
+            args=(i, chunk_start, chunk_end, skip_until),
             daemon=True
         )
         t.start()
@@ -581,6 +592,7 @@ def main():
 
     for t in threads:
         t.join()
+
 
 
 if __name__ == "__main__":
