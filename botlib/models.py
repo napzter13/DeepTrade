@@ -154,7 +154,7 @@ If you are unsure, provide your best estimate within the specified range."""
         return 0.0
     
 
-def load_advanced_lstm_model(model_5m_window=60, model_15m_window=60, model_1h_window=60, feature_dim=9, santiment_dim=12, ta_dim=63, signal_dim=11):
+def load_advanced_lstm_model(model_5m_window=241, model_15m_window=241, model_1h_window=241, feature_dim=9, santiment_dim=12, ta_dim=63, signal_dim=11):
     if os.path.exists(ADVANCED_MODEL_PATH):
         try:
             loaded = tf.keras.models.load_model(ADVANCED_MODEL_PATH)

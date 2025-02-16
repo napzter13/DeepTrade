@@ -53,19 +53,19 @@ class Trainer:
         self,
         training_csv="training_data/training_data.csv",
         model_out="models/advanced_lstm_model.keras",
-        window_5m=60,
+        window_5m=241,
         feature_5m=9,
-        window_15m=60,
+        window_15m=241,
         feature_15m=9,
-        window_1h=60,
+        window_1h=241,
         feature_1h=9,
-        window_google_trend=8,
+        window_google_trend=24,
         feature_google_trend=1,
         santiment_dim=12,
         ta_dim=63,
         signal_dim=11,
         epochs=600,
-        batch_size=2048,
+        batch_size=64,
         apply_scaling=True,
         train_ratio=0.7,
         val_ratio=0.2,
@@ -178,10 +178,10 @@ class Trainer:
                     y_val         = float(y_str)
 
                     # Check shapes
-                    if len(arr_5m_list)!=60:      continue
-                    if len(arr_15m_list)!=60:     continue
-                    if len(arr_1h_list)!=60:      continue
-                    if len(arr_google_trend_list)!=8:      continue
+                    if len(arr_5m_list)!=241:      continue
+                    if len(arr_15m_list)!=241:     continue
+                    if len(arr_1h_list)!=241:      continue
+                    if len(arr_google_trend_list)!=24:      continue
                     if len(arr_santiment_list)!=12:    continue
                     if len(arr_ta_63list)!=63:    continue
                     if len(arr_ctx_11list)!=11:   continue
@@ -199,10 +199,10 @@ class Trainer:
                     self.logger.warning(f"Skipping row parse error: {e}")
                     continue
 
-        X_5m   = np.array(all_5m,   dtype=np.float32)   # shape=(N,60,9)
-        X_15m  = np.array(all_15m,  dtype=np.float32)   # shape=(N,60,9)
-        X_1h   = np.array(all_1h,   dtype=np.float32)   # shape=(N,60,9)
-        X_google_trend = np.array(all_google_trend, dtype=np.float32)  # shape=(N,8,1)
+        X_5m   = np.array(all_5m,   dtype=np.float32)   # shape=(N,241,9)
+        X_15m  = np.array(all_15m,  dtype=np.float32)   # shape=(N,241,9)
+        X_1h   = np.array(all_1h,   dtype=np.float32)   # shape=(N,241,9)
+        X_google_trend = np.array(all_google_trend, dtype=np.float32)  # shape=(N,24,1)
         X_santiment    = np.array(all_santiment,    dtype=np.float32)  # shape=(N,12)
         X_ta           = np.array(all_ta,           dtype=np.float32)  # shape=(N,63)
         X_ctx          = np.array(all_ctx,          dtype=np.float32)  # shape=(N,11)
@@ -339,44 +339,52 @@ class Trainer:
         # 6) Train LSTM
         early_stop = tf.keras.callbacks.EarlyStopping(
             monitor='val_loss',
-            patience=10,
+            patience=50,
             restore_best_weights=True
         )
         self.logger.info(f"Start LSTM training epochs={self.epochs}, batch_size={self.batch_size}")
 
-        # print("==== Debug Train Data ====")
-        # print("X_5m_train[0] =\n", X_5m_train[0])  # shape (60,9)
-        # print("X_15m_train[0] =\n", X_15m_train[0])  # etc.
-
-        # print("Some label samples (Y_train[:10]) =", Y_train[:10])
-        # print("Y stats => min:", np.min(Y_train), "max:", np.max(Y_train), 
-        #     "mean:", np.mean(Y_train), "std:", np.std(Y_train))
-        
-        # print("==== Debug Val Data ====")
-        # print("X_5m_val[0] =", X_5m_val[0])
-        # print("Y_val[:10]  =", Y_val[:10])
-        # print("Y_val stats => min:", np.min(Y_val), ...)
-
         self.model.fit(
             x=[
-                X_5m_train, X_15m_train, X_1h_train,
-                X_google_trend_train, X_santiment_train,
-                X_ta_train, X_ctx_train
+                X_5m_train[:500], X_15m_train[:500], X_1h_train[:500],
+                X_google_trend_train[:500], X_santiment_train[:500],
+                X_ta_train[:500], X_ctx_train[:500]
             ],
-            y=Y_train,
+            y=Y_train[:500],
             validation_data=(
                 [
-                    X_5m_val, X_15m_val, X_1h_val,
-                    X_google_trend_val, X_santiment_val,
-                    X_ta_val, X_ctx_val
+                    X_5m_val[:500], X_15m_val[:500], X_1h_val[:500],
+                    X_google_trend_val[:500], X_santiment_val[:500],
+                    X_ta_val[:500], X_ctx_val[:500]
                 ],
-                Y_val
+                Y_val[:500]
             ) if len(Y_val)>0 else None,
             epochs=self.epochs,
             batch_size=self.batch_size,
             callbacks=[early_stop],
             verbose=1
         )
+        
+        # self.model.fit(
+        #     x=[
+        #         X_5m_train, X_15m_train, X_1h_train,
+        #         X_google_trend_train, X_santiment_train,
+        #         X_ta_train, X_ctx_train
+        #     ],
+        #     y=Y_train,
+        #     validation_data=(
+        #         [
+        #             X_5m_val, X_15m_val, X_1h_val,
+        #             X_google_trend_val, X_santiment_val,
+        #             X_ta_val, X_ctx_val
+        #         ],
+        #         Y_val
+        #     ) if len(Y_val)>0 else None,
+        #     epochs=self.epochs,
+        #     batch_size=self.batch_size,
+        #     callbacks=[early_stop],
+        #     verbose=1
+        # )
 
         # 7) Evaluate on test set
         if len(Y_test)>0:
@@ -466,7 +474,7 @@ class Trainer:
             state_dim=state_dim,
             gamma=0.99,
             lr=0.001,
-            batch_size=2048,
+            batch_size=64,
             max_memory=len(transitions)+1,  # to hold all transitions
             epsilon_start=0.0,   # no exploration needed for offline
             epsilon_min=0.0,
@@ -526,7 +534,7 @@ def parse_args():
                         help="File to save the LSTM model.")
     parser.add_argument("--epochs", type=int, default=600,
                         help="Epochs for LSTM.")
-    parser.add_argument("--batch_size", type=int, default=2048,
+    parser.add_argument("--batch_size", type=int, default=64,
                         help="Batch size for LSTM.")
     parser.add_argument("--no_scale", action="store_true",
                         help="Disable scaling for time-series branches.")

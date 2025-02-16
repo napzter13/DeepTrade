@@ -37,22 +37,18 @@ from botlib.environment import (
 
 # --------------------------------------------------------------------------------
 # Adjust these for different exact time range:
-START_TIME = datetime.datetime(2025, 1, 1)
-END_TIME   = datetime.datetime(2025, 2, 14)
-
-## LAST TRAINING_DATA:
-# START_TIME = datetime.datetime(2025, 1, 1)
-# END_TIME   = datetime.datetime(2025, 2, 14)
+START_TIME = datetime.datetime(2024, 1, 1)
+END_TIME   = datetime.datetime(2025, 1, 1)
 # --------------------------------------------------------------------------------
 
 # Global concurrency variable:
 ## Setting this value above 1 is only to collect a bunch of training_data.
 ## It cannot be used for backtesting to output csv files.
-CONCURRENT_THREADS = 1
+CONCURRENT_THREADS = 5
 
 DO_USE_REAL_GPT = False
-DO_USE_MODEL_PRED = True
-MAKE_TRAINING_DATA = False
+DO_USE_MODEL_PRED = False
+MAKE_TRAINING_DATA = True
 BLOCK_SANTIMENT_FETCHING = True
 
 
@@ -64,8 +60,14 @@ os.makedirs("training_data", exist_ok=True)
 
 
 # training_data
-TRAINING_DATA_FILE = os.path.join("training_data", "training_data_{:%Y_%m_%d}.csv".format(END_TIME))
-RL_TRANSITIONS_FILE = os.path.join("training_data", "rl_transitions_{:%Y_%m_%d}.csv".format(END_TIME))
+TRAINING_DATA_FILE = os.path.join(
+    "training_data", 
+    "training_data_{:%Y_%m_%d}_to_{:%Y_%m_%d}.csv".format(START_TIME, END_TIME)
+)
+RL_TRANSITIONS_FILE = os.path.join(
+    "training_data", 
+    "rl_transitions_{:%Y_%m_%d}_to_{:%Y_%m_%d}.csv".format(START_TIME, END_TIME)
+)
 
 # We'll have scenario-based CSVs plus final:
 CSV_GPT1  = os.path.join("output", "backtest_result_local_gpt_1.csv")
@@ -108,7 +110,7 @@ class HistoricalTradingBot(TradingBot):
         self.current_datetime = dt
 
     # Overridden fetch => pass self.current_datetime
-    def fetch_klines(self, symbol="BTCEUR", interval=None, limit=60, end_dt:datetime.datetime=None):
+    def fetch_klines(self, symbol="BTCEUR", interval=None, limit=241, end_dt:datetime.datetime=None):
         return super().fetch_klines(symbol, interval, limit, self.current_datetime)
 
     def fetch_price_at_hour(self, symbol="BTCEUR", dt: datetime.datetime = None):
@@ -289,23 +291,21 @@ class Backtester:
            y]
         """
         with file_write_lock:
-            if not os.path.exists(TRAINING_DATA_FILE):
-                os.makedirs(os.path.dirname(TRAINING_DATA_FILE), exist_ok=True)
-                with open(TRAINING_DATA_FILE, "w", newline="", encoding="utf-8") as f:
-                    w = csv.writer(f)
-                    w.writerow([
-                        "timestamp", "arr_5m", "arr_15m", "arr_1h",
-                        "arr_google_trend", "arr_santiment",
-                        "arr_ta_63", "arr_ctx_11",
-                        "y"
-                    ])
+            os.makedirs(os.path.dirname(TRAINING_DATA_FILE), exist_ok=True)
+            with open(TRAINING_DATA_FILE, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow([
+                    "timestamp", "arr_5m", "arr_15m", "arr_1h",
+                    "arr_google_trend", "arr_santiment",
+                    "arr_ta_63", "arr_ctx_11",
+                    "y"
+                ])
         
             # RL Transitions
-            if not os.path.exists(RL_TRANSITIONS_FILE):
-                with open(RL_TRANSITIONS_FILE, "w", encoding="utf-8", newline="") as f:
-                    w = csv.writer(f)
-                    w.writerow(["old_state","action","reward","new_state","done"])
-                    
+            with open(RL_TRANSITIONS_FILE, "w", encoding="utf-8", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["old_state","action","reward","new_state","done"])
+                
 
     def run_backtest(self):
         self.logger.info(

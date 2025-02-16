@@ -91,8 +91,11 @@ class TradingBot:
         self.news_api_key = os.getenv("NEWS_API_KEY", None)
 
         # Binance
-        if self.binance_client is None:
+        try:
             self.binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+        except Exception as e:
+            print(f"Error initializing Binance client: {e}")
+            
         self.symbol = "BTCEUR"
 
         # Basic params
@@ -139,9 +142,9 @@ class TradingBot:
         self.last_equity = None  # for PnL-based reward
 
         # Multi-timeframe LSTM model config
-        self.model_5m_window = 60     # how many bars for 5m
-        self.model_15m_window = 60    # how many bars for 15m
-        self.model_1h_window = 60     # how many bars for 1h
+        self.model_5m_window = 241     # how many bars for 5m
+        self.model_15m_window = 241    # how many bars for 15m
+        self.model_1h_window = 241     # how many bars for 1h
         self.num_features_per_bar = 9  # e.g. [open, high, low, close, volume, quote_volume, trades, taker_base_volume, taker_quote_volume]
 
         self.santiment_dim = 12        # Santiment features
@@ -200,7 +203,7 @@ class TradingBot:
     # Overriden methods for backtesting or live usage
     ###########################################################################
     
-    def fetch_klines(self, symbol="BTCEUR", interval=Client.KLINE_INTERVAL_5MINUTE, limit=60, end_dt:datetime.datetime=None):
+    def fetch_klines(self, symbol="BTCEUR", interval=Client.KLINE_INTERVAL_5MINUTE, limit=241, end_dt:datetime.datetime=None):
         return df_get_klines(self.binance_client, symbol=symbol, interval=interval, limit=limit, end_dt=end_dt)
     
     def fetch_price_at_hour(self, symbol="BTCEUR", dt: datetime.datetime = datetime.datetime.now()):
@@ -251,10 +254,10 @@ class TradingBot:
     def get_input_signal(self, arr_5m, arr_15m, arr_1h, arr_google_trend, arr_santiment, arr_ta, arr_ctx):
         """
         Inference using the advanced multi-input LSTM model:
-          - arr_5m  -> shape (1, 60, 9)
-          - arr_15m -> shape (1, 60, 9)
-          - arr_1h  -> shape (1, 60, 9)
-          - arr_google_trend -> shape (1,8,1)
+          - arr_5m  -> shape (1, 241, 9)
+          - arr_15m -> shape (1, 241, 9)
+          - arr_1h  -> shape (1, 241, 9)
+          - arr_google_trend -> shape (1,24,1)
           - arr_santiment -> shape (1,12)
           - arr_ta   -> shape (1,63)
           - arr_ctx  -> shape (1,11)
@@ -348,11 +351,11 @@ class TradingBot:
                 
         prompt_lines.append("")
 
-        # We'll store time-series arrays as zeros if we lack exactly 60 bars
+        # We'll store time-series arrays as zeros if we lack exactly 241 bars
         arr_5m  = np.zeros((1,self.model_5m_window,self.num_features_per_bar), dtype=np.float32)
         arr_15m = np.zeros((1,self.model_15m_window,self.num_features_per_bar), dtype=np.float32)
         arr_1h  = np.zeros((1,self.model_1h_window,self.num_features_per_bar), dtype=np.float32)
-        arr_google_trend  = np.zeros((1,8,1), dtype=np.float32)
+        arr_google_trend  = np.zeros((1,24,1), dtype=np.float32)
         arr_santiment = [0.0]*12
         ta_63_list = [0.0]*63
         arr_ta_63  = np.array(ta_63_list, dtype=np.float32).reshape((1,63))
@@ -397,15 +400,15 @@ class TradingBot:
         arr = []
         for k in google_trend:
             arr.append([k])
-        arr_google_trend = np.array(arr, dtype=np.float32).reshape((1,8,1))
+        arr_google_trend = np.array(arr, dtype=np.float32).reshape((1,24,1))
         
         arr = []
         for k in santiment_data.values():
             arr.append(k)
         arr_santiment = np.array(arr, dtype=np.float32).reshape((1,12))
         
-        # ) If we have 60 bars in each timeframe, do full TAs & arrays
-        if len(klines_5m) == 60 and len(klines_15m) == 60 and len(klines_1h) == 60:
+        # ) If we have 241 bars in each timeframe, do full TAs & arrays
+        if len(klines_5m) == 241 and len(klines_15m) == 241 and len(klines_1h) == 241:
             arr_5m  = klines_to_array(klines_5m).reshape((1,self.model_5m_window,self.num_features_per_bar))
             arr_15m = klines_to_array(klines_15m).reshape((1,self.model_15m_window,self.num_features_per_bar))
             arr_1h  = klines_to_array(klines_1h).reshape((1,self.model_1h_window,self.num_features_per_bar))
@@ -517,10 +520,10 @@ class TradingBot:
         if use_model_pred:
             # ) Multi-input LSTM => final_pred
             final_pred = self.get_input_signal(
-                arr_5m,    # shape=(1,60,9)
-                arr_15m,   # shape=(1,60,9)
-                arr_1h,    # shape=(1,60,9)
-                arr_google_trend,    # shape=(1,8,1)
+                arr_5m,    # shape=(1,241,9)
+                arr_15m,   # shape=(1,241,9)
+                arr_1h,    # shape=(1,241,9)
+                arr_google_trend,    # shape=(1,24,1)
                 arr_santiment,    # shape=(1,12)
                 arr_ta_63, # shape=(1,63)
                 arr_ctx_11 # shape=(1,11)
@@ -946,7 +949,7 @@ class TradingBot:
             if PAPER_TRADING:
                 self.manage_open_position_paper(current_price)
 
-            # 2) fetch 60-bar klines for 5m,15m,1h + other data
+            # 2) fetch 241-bar klines for 5m,15m,1h + other data
             klines_5m = self.fetch_klines(interval=Client.KLINE_INTERVAL_5MINUTE, limit=self.model_5m_window)
             klines_15m= self.fetch_klines(interval=Client.KLINE_INTERVAL_15MINUTE, limit=self.model_15m_window)
             klines_1h = self.fetch_klines(interval=Client.KLINE_INTERVAL_1HOUR, limit=self.model_1h_window)
@@ -991,7 +994,7 @@ class TradingBot:
 
             # 4) RL-based decision
             atr_val = 0.0
-            if klines_15m and len(klines_15m) == 60:
+            if klines_15m and len(klines_15m) == 241:
                 atr_v = compute_atr_from_klines(klines_15m, 14)
                 atr_val = atr_v/current_price if atr_v else 0.0
 

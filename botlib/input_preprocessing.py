@@ -67,7 +67,7 @@ class ModelScaler:
        - self.scaler_15m
        - self.scaler_1h
        - self.scaler_google_trend
-       Each is a StandardScaler fit on shape (N*60,9).
+       Each is a StandardScaler fit on shape (N*241,9).
     2) TA features (63-dim):
        - self.ta_scalers => list of 63 MinMaxScalers(feature_range=(-1,1)),
          one per column. So each TA can have a separate min & max.
@@ -130,8 +130,8 @@ class ModelScaler:
         if not hasattr(X_5m, "shape"):
             X_5m = np.array(X_5m, dtype=float)
         if len(X_5m.shape) == 1:
-            # reshape (N,) => (N,60,1) if needed
-            X_5m = X_5m.reshape(-1, 60, 1)
+            # reshape (N,) => (N,241,1) if needed
+            X_5m = X_5m.reshape(-1, 241, 1)
             
         N, T, D = X_5m.shape
         flatten = X_5m.reshape((N * T, D))
@@ -152,7 +152,7 @@ class ModelScaler:
         if not hasattr(X_5m, "shape"):
             X_5m = np.array(X_5m, dtype=float)
         if len(X_5m.shape) == 1:
-            X_5m = X_5m.reshape(-1, 60, 1)
+            X_5m = X_5m.reshape(-1, 241, 1)
 
         N, T, D = X_5m.shape
         flatten = X_5m.reshape((N * T, D))
@@ -170,7 +170,7 @@ class ModelScaler:
         if not hasattr(X_15m, "shape"):
             X_15m = np.array(X_15m, dtype=float)
         if len(X_15m.shape) == 1:
-            X_15m = X_15m.reshape(-1, 60, 1)
+            X_15m = X_15m.reshape(-1, 241, 1)
             
         N, T, D = X_15m.shape
         flatten = X_15m.reshape((N * T, D))
@@ -187,7 +187,7 @@ class ModelScaler:
         if not hasattr(X_15m, "shape"):
             X_15m = np.array(X_15m, dtype=float)
         if len(X_15m.shape) == 1:
-            X_15m = X_15m.reshape(-1, 60, 1)
+            X_15m = X_15m.reshape(-1, 241, 1)
 
         N, T, D = X_15m.shape
         flatten = X_15m.reshape((N * T, D))
@@ -203,7 +203,7 @@ class ModelScaler:
         if not hasattr(X_1h, "shape"):
             X_1h = np.array(X_1h, dtype=float)
         if len(X_1h.shape) == 1:
-            X_1h = X_1h.reshape(-1, 60, 1)
+            X_1h = X_1h.reshape(-1, 241, 1)
             
         N, T, D = X_1h.shape
         flatten = X_1h.reshape((N * T, D))
@@ -220,7 +220,7 @@ class ModelScaler:
         if not hasattr(X_1h, "shape"):
             X_1h = np.array(X_1h, dtype=float)
         if len(X_1h.shape) == 1:
-            X_1h = X_1h.reshape(-1, 60, 1)
+            X_1h = X_1h.reshape(-1, 241, 1)
 
         N, T, D = X_1h.shape
         flatten = X_1h.reshape((N * T, D))
@@ -236,7 +236,7 @@ class ModelScaler:
         if not hasattr(X_google_trend, "shape"):
             X_google_trend = np.array(X_google_trend, dtype=float)
         if len(X_google_trend.shape) == 1:
-            X_google_trend = X_google_trend.reshape(-1, 8, 1)
+            X_google_trend = X_google_trend.reshape(-1, 24, 1)
                 
         N, T, D = X_google_trend.shape
         flatten = X_google_trend.reshape((N*T, D))

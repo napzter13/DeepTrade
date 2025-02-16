@@ -207,7 +207,7 @@ def get_klines(
     binance_client: Client,
     symbol="BTCEUR",
     interval=Client.KLINE_INTERVAL_5MINUTE,
-    limit=60,
+    limit=241,
     end_dt: datetime.datetime = None
 ):
     """
@@ -475,7 +475,7 @@ def fetch_news_data(days=1, end_dt=None):
 ###############################################################################
 # fetch_google_trends
 ###############################################################################
-def fetch_google_trends(end_dt=None, max_retries=1, delay=5, days=7):
+def fetch_google_trends(end_dt=None, max_retries=1, delay=5, days=24-1):
     """
     Fetch daily Google Trends data for "Bitcoin" over a specified window.
     
