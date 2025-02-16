@@ -3,6 +3,8 @@ botlib/__pycache__/
 .env
 debug/
 input_cache/
-models/
 output/
 training_data/
+
+models/*
+!models/advanced_lstm_model_architecture.png

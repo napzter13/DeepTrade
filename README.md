@@ -1,10 +1,10 @@
 # DeepTrade
 
-DeepTrade is a Python-based prototype for quantitative cryptocurrency trading and research. It combines historical backtesting, multi-timeframe LSTM modeling, GPT-based sentiment analysis, and optional offline Reinforcement Learning (DQN).
+DeepTrade is a Python-based prototype for quantitative cryptocurrency (*now Bitcoin (BTC) - Solana (SOL) to come*) trading and research. It combines historical backtesting, multi-timeframe LSTM modeling, GPT-based sentiment analysis, and optional offline Reinforcement Learning (DQN).
 
 ## Multi-Timeframe LSTM-Transformer Model Architecture
 
-<div align="center"><center><img src="lstm_model_architecture.png" alt="Multi-Timeframe LSTM-Transformer Model Architecture" width="300"></center></div>
+<div align="center"><center><img src="models/advanced_lstm_model_architecture.png" alt="Multi-Timeframe LSTM-Transformer Model Architecture" width="300"></center></div>
 
 Advanced multi-input deep learning architecture combining residual LSTM layers, Transformer-style self-attention mechanisms, and dense feed-forward networks. The model processes multiple time-series inputs (e.g., 5m, 15m, 1h, Google Trends and Santiment data) alongside sentiment analysis, technical indicators, and market signals. Each time-series branch undergoes LSTM-based encoding, followed by Transformer layers for capturing sequential dependencies. The encoded outputs are then merged with contextual inputs (Santiment, TA indicators, and signal data), forming a unified latent representation, which is further refined through fully connected layers to produce a signal.
 
