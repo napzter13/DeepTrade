@@ -42,10 +42,6 @@ os.makedirs("models", exist_ok=True)
 os.makedirs("input_cache", exist_ok=True)
 
 # Cache file constants
-ORDERBOOK_CACHE_FILE = os.path.join("input_cache", "orderbook_cache.json")
-REDDIT_SENTIMENT_CACHE_FILE = os.path.join("input_cache", "reddit_sentiment_cache.json")
-GOOGLE_TRENDS_CACHE_FILE = os.path.join("input_cache", "google_trends_cache.json")
-NEWS_ANALYZE_CACHE_FILE = "input_cache/news_analyze_cache.json"
 GPT_CACHE_FILE = os.path.join("input_cache", "gpt_cache.json")
 
 # Basic logger configuration

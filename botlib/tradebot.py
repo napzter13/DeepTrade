@@ -212,17 +212,17 @@ class TradingBot:
     def fetch_order_book(self, symbol="BTCEUR", limit=20, dt: datetime.datetime = None):
         return df_fetch_order_book(self.binance_client, symbol, limit, dt)
     
-    def fetch_news_data(self, days=1, end_dt=None):
-        return df_fetch_news_data(days, end_dt)
+    def fetch_news_data(self, days=1, topic="Bitcoin", end_dt=None):
+        return df_fetch_news_data(days, topic, end_dt)
         
-    def fetch_google_trends(self, end_dt=None):
-        return df_fetch_google_trends(end_dt)
+    def fetch_google_trends(self, end_dt=None, topic="Bitcoin"):
+        return df_fetch_google_trends(end_dt, topic)
         
-    def fetch_santiment_data(self, end_dt=None, only_look_in_cache = False):
-        return df_fetch_santiment_data(end_dt, only_look_in_cache)
+    def fetch_santiment_data(self, end_dt=None, topic="bitcoin", only_look_in_cache = False):
+        return df_fetch_santiment_data(end_dt, topic, only_look_in_cache)
         
-    def fetch_reddit_sentiment(self, dt: datetime.datetime = None):
-        return df_fetch_reddit_sentiment(dt)
+    def fetch_reddit_sentiment(self, dt: datetime.datetime = None, topic="Bitcoin"):
+        return df_fetch_reddit_sentiment(dt, topic)
         
     def get_local_model_assessment(
         self,

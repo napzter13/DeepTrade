@@ -30,10 +30,6 @@ from pytrends.request import TrendReq
 from nltk.sentiment import SentimentIntensityAnalyzer
 
 from .environment import (
-    ORDERBOOK_CACHE_FILE,
-    REDDIT_SENTIMENT_CACHE_FILE,
-    GOOGLE_TRENDS_CACHE_FILE,
-    NEWS_ANALYZE_CACHE_FILE,
     SANTIMENT_API_KEY,
     REDDIT_CLIENT_ID,
     REDDIT_CLIENT_SECRET,
@@ -97,13 +93,38 @@ def compute_average_sentiment(texts):
     return (sum(compunds)/len(compunds))*100
 
 # Utility: load/save JSON
-def load_json_cache(filepath):
+def get_cache_file_path(name, topic, date):
     """
-    Loads the JSON cache file in a thread-safe way:
+    Returns the full file path for the cache:
+      - If date is provided (assumed to be a date/datetime object), returns:
+          input_cache/<name>/<year>/<month>/<day>/cache.json
+      - If date is None, returns:
+          input_cache/<name>/cache.json
+    """
+    base_dir = os.path.join("input_cache", name, topic)
+    if date:
+        # Format month and day as two-digit numbers.
+        base_dir = os.path.join(base_dir, str(date.year), f"{date.month:02d}", f"{date.day:02d}")
+    # Ensure the directory exists.
+    os.makedirs(base_dir, exist_ok=True)
+    return os.path.join(base_dir, "cache.json")
+
+def load_json_cache(name, topic, date):
+    """
+    Loads the JSON cache file in a thread-safe way.
+    
+    Cache file location:
+      - If date is provided: input_cache/<name>/<year>/<month>/<day>/cache.json
+      - If date is None: input_cache/<name>/cache.json
+
+    The function:
       - Acquires a shared lock (LOCK_SH) so multiple readers can read concurrently.
       - Returns {} if the file doesn't exist or can't be parsed.
     """
+    filepath = get_cache_file_path(name, topic, date)
     lock_path = filepath + ".lock"
+    
+    # Ensure the directory exists for the cache file.
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     
     with open(lock_path, "a") as lock_file:
@@ -118,22 +139,30 @@ def load_json_cache(filepath):
         else:
             return {}
 
-def save_json_cache(filepath, new_data):
+def save_json_cache(name, topic, date, new_data):
     """
-    Saves new_data into the JSON cache file in a thread-safe, atomic manner:
-      1. Acquires an exclusive lock (LOCK_EX) so only one writer at a time.
-      2. Reads the existing file from disk again (while locked) to avoid losing updates from other threads.
-      3. Inserts (merges) new_data into the old data—keys from new_data overwrite or add to what's there.
-         * If we only pass a single key in new_data (like {"myKey": ...}), this is a minimal overhead insertion.
-      4. Writes out the merged JSON to a temp file and uses os.replace to ensure an atomic write.
-    """
-    lock_path = filepath + ".lock"
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    Saves new_data into the JSON cache file in a thread-safe, atomic manner.
+    
+    Cache file location:
+      - If date is provided: input_cache/<name>/<year>/<month>/<day>/cache.json
+      - If date is None: input_cache/<name>/cache.json
 
+    Steps:
+      1. Acquires an exclusive lock (LOCK_EX) so only one writer can update at a time.
+      2. Reads the current on-disk data (while locked) to avoid overwriting concurrent updates.
+      3. Merges new_data into the old data (keys from new_data overwrite or add).
+      4. Writes the merged data to a temporary file and then uses os.replace for an atomic update.
+    """
+    filepath = get_cache_file_path(name, topic, date)
+    lock_path = filepath + ".lock"
+    
+    # Ensure the directory exists for the cache file.
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    
     with open(lock_path, "a") as lock_file:
         portalocker.lock(lock_file, portalocker.LOCK_EX)  # Exclusive lock for writing
 
-        # 1) Read current on-disk data again while we hold the lock.
+        # Read the current data while holding the lock.
         old_data = {}
         if os.path.exists(filepath):
             try:
@@ -142,11 +171,10 @@ def save_json_cache(filepath, new_data):
             except Exception as e:
                 logger.warning(f"Could not parse {filepath} before saving: {e}")
 
-        # 2) Insert new_data into old_data (avoiding large merges if new_data is only 1 key).
-        #    If new_data = {"newKey": ...}, then only that one key is updated.
+        # Merge new_data into old_data.
         old_data.update(new_data)
 
-        # 3) Write to a temp file, then atomically replace the original.
+        # Write to a temporary file, then atomically replace the original.
         tmp_filepath = filepath + ".tmp"
         try:
             with open(tmp_filepath, "w", encoding="utf-8") as f:
@@ -154,33 +182,9 @@ def save_json_cache(filepath, new_data):
             os.replace(tmp_filepath, filepath)
         except Exception as e:
             logger.error(f"Could not write cache to {filepath}: {e}")
-    # Lock is released on exit
+    # The lock is automatically released on exit.
 
 
-###############################################################################
-# Utility: For fetch_order_book & fetch_reddit_sentiment "nearest hour" approach
-###############################################################################
-def find_nearest_hour_key(cache_dict, dt_floor):
-    """Given a dictionary of hour-based keys (YYYY-MM-DD HH:00:00),
-       find the stored key with minimal absolute difference from dt_floor."""
-    if not cache_dict:
-        return None
-    all_keys = list(cache_dict.keys())
-    dt_list = []
-    for k in all_keys:
-        try:
-            dtp = datetime.datetime.strptime(k, "%Y-%m-%d %H:%M:%S")
-            dt_list.append(dtp)
-        except:
-            pass
-    if not dt_list:
-        return None
-
-    def abs_diff(a, b):
-        return abs((a - b).total_seconds())
-
-    best_match = min(dt_list, key=lambda x: abs_diff(x, dt_floor))
-    return best_match.strftime("%Y-%m-%d %H:%M:%S")
 
 ###############################################################################
 # get_klines
@@ -218,14 +222,14 @@ def get_klines(
     Then we do the logic: if not found => fetch from binance, store, return.
     Cache file => input_cache/klines_cache.json
     """
-    cache_file = "input_cache/klines_cache.json"
-    cache_dict = load_json_cache(cache_file)
 
     if end_dt is None:
         end_dt = datetime.datetime.utcnow()
     dt_floor = end_dt.replace(minute=0, second=0, microsecond=0)
 
-    key = f"{symbol}-{interval}-{limit}-{dt_floor.strftime('%Y-%m-%d %H:%M:%S')}"
+    cache_dict = load_json_cache("klines_cache", symbol, dt_floor)
+    
+    key = f"{interval}-{limit}-{dt_floor.hour}"
 
     if key in cache_dict:
         logger.info(f"[get_klines] Using cache => {key}")
@@ -265,7 +269,7 @@ def get_klines(
         cleaned_kline = [float(kline[i]) for i in indexes_to_keep]
         cleaned_data.append(cleaned_kline)
 
-    save_json_cache(cache_file, {key: cleaned_data})
+    save_json_cache("klines_cache", symbol, dt_floor, {key: cleaned_data})
     return cleaned_data
 
 
@@ -278,15 +282,15 @@ def fetch_price_at_hour(binance_client: Client, symbol="BTCEUR", dt: datetime.da
     If dt < 1 hour ago => fetch 1-hour kline from dt..(dt+1h). If none => None.
     Store in input_cache/price_at_hour_cache.json
     """
-    cache_file = "input_cache/price_at_hour_cache.json"
-    cache_dict = load_json_cache(cache_file)
 
     now_utc = datetime.datetime.utcnow()
     if dt is None:
         dt = now_utc
     dt_floor = dt.replace(minute=0, second=0, microsecond=0)
 
-    key = f"{symbol}-{dt_floor.strftime('%Y-%m-%d %H:%M:%S')}"
+    cache_dict = load_json_cache("price_at_hour_cache", symbol, dt_floor)
+    
+    key = dt_floor.hour
     if key in cache_dict:
         logger.info(f"[fetch_price_at_hour] Using cache => {key}")
         return cache_dict[key]
@@ -323,7 +327,7 @@ def fetch_price_at_hour(binance_client: Client, symbol="BTCEUR", dt: datetime.da
             logger.error(f"Error fetching historical klines: {e}")
             return np.nan
 
-    save_json_cache(cache_file, {key: val})
+    save_json_cache("price_at_hour_cache", symbol, dt_floor, {key: val})
     return val
 
 
@@ -339,49 +343,28 @@ def fetch_order_book(binance_client: Client,
     If dt is provided => we search for that floored hour in the cache, if not found => we do nearest hour,
     if that fails => fetch new as of now, store under that now floored hour.
     """
-    cache_file = ORDERBOOK_CACHE_FILE
-    cache_data = load_json_cache(cache_file)
-
     if dt is None:
         dt_now = datetime.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
-        key = f"{symbol}-{dt_now.strftime('%Y-%m-%d %H:%M:%S')}"
     else:
-        dt_floor = dt.replace(minute=0, second=0, microsecond=0)
-        key = dt_floor.strftime("%Y-%m-%d %H:%M:%S")
-        key = f"{symbol}-{key}"
+        dt_now = dt.replace(minute=0, second=0, microsecond=0)
+    key = dt_now.hour
 
+    cache_data = load_json_cache("orderbook_cache", symbol, dt_now)
+    
     if key in cache_data:
         logger.info(f"[fetch_order_book] Using cached => {key}")
         return cache_data[key]
 
-    # Not found => if dt is not None, find nearest
+    # Not found => if dt is not None, find one in the same day
     if dt is not None:
-        logger.info(f"[fetch_order_book] Not found => search nearest hour => {key}")
-        # key is e.g. 'BTCEUR-2023-09-15 15:00:00'
-        # We want to do: find nearest. Let's parse out the actual dt from the key
-        splitted = key.split("-",1)
-        # splitted[0] => symbol? splitted[1] => '2023-09-15 15:00:00'
-        if len(splitted)==2:
-            dt_part = splitted[1]
-        else:
-            dt_part = "2023-01-01 00:00:00"
-        try:
-            dt_req = datetime.datetime.strptime(dt_part, "%Y-%m-%d %H:%M:%S")
-        except:
-            dt_req = datetime.datetime.min
+        for key, value in cache_data.items():
+            return value
 
-        # find nearest
-        nearest_key = find_nearest_hour_key(cache_data, dt_req)
-        if nearest_key:
-            real_key = f"{symbol}-{nearest_key}"
-            logger.info(f"[fetch_order_book] Found nearest => {real_key}")
-            return cache_data[real_key]
-        else:
-            logger.info("[fetch_order_book] No parseable entries => fallback fetch now")
+        logger.info("[fetch_order_book] No parseable entries => fallback fetch now")
 
     # If we get here => we fetch "live" as of now
     dt_now = datetime.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
-    newkey = f"{symbol}-{dt_now.strftime('%Y-%m-%d %H:%M:%S')}"
+    newkey = dt_now.hour
     logger.info(f"[fetch_order_book] fallback fetch => store under => {newkey}")
 
     try:
@@ -410,7 +393,7 @@ def fetch_order_book(binance_client: Client,
                 "asks": asks
             }
         
-        save_json_cache(cache_file, {newkey: result})
+        save_json_cache("orderbook_cache", symbol, dt_now, {newkey: result})
         return result
     except Exception as e:
         logger.error(f"Order book error: {e}")
@@ -420,24 +403,23 @@ def fetch_order_book(binance_client: Client,
 ###############################################################################
 # fetch_news_data
 ###############################################################################
-def fetch_news_data(days=1, end_dt=None):
+def fetch_news_data(days=1, topic="Bitcoin", end_dt=None):
     """
     If end_dt is None => we do now floored hour, if end_dt => floor => key
     from=(end_dt-days)..end_dt
     Cache => input_cache/news_data_cache.json
     """
-    cache_file = "input_cache/news_data_cache.json"
-    cache_dict = load_json_cache(cache_file)
-
     if end_dt is None:
         dt_now = datetime.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
-        key = f"btc-news-{days}-{dt_now.strftime('%Y-%m-%d %H:%M:%S')}"
         dt_end = dt_now
     else:
         dt_floor = end_dt.replace(minute=0, second=0, microsecond=0)
-        key = f"btc-news-{days}-{dt_floor.strftime('%Y-%m-%d %H:%M:%S')}"
         dt_end = dt_floor
+        
+    key = dt_end.hour
 
+    cache_dict = load_json_cache("news_data_cache", topic, dt_end)
+    
     if key in cache_dict:
         logger.info(f"[fetch_news_data] Using cache => {key}")
         return cache_dict[key]
@@ -455,7 +437,7 @@ def fetch_news_data(days=1, end_dt=None):
         from_str = start_dt.strftime("%Y-%m-%d")
         to_str   = dt_end.strftime("%Y-%m-%d")
         url = (
-            f"https://newsapi.org/v2/everything?q=Bitcoin"
+            f"https://newsapi.org/v2/everything?q={topic}"
             f"&from={from_str}&to={to_str}"
             f"&sortBy=publishedAt&apiKey={NEWS_API_KEY}"
         )
@@ -468,14 +450,14 @@ def fetch_news_data(days=1, end_dt=None):
             logger.error(f"News fetch error: {e}")
             articles = []
 
-    save_json_cache(cache_file, {key: articles})
+    save_json_cache("news_data_cache", topic, dt_end, {key: articles})
     return articles
 
 
 ###############################################################################
 # fetch_google_trends
 ###############################################################################
-def fetch_google_trends(end_dt=None, max_retries=1, delay=5, days=24-1):
+def fetch_google_trends(end_dt=None, topic="Bitcoin", max_retries=1, delay=5, days=24-1):
     """
     Fetch daily Google Trends data for "Bitcoin" over a specified window.
     
@@ -489,15 +471,13 @@ def fetch_google_trends(end_dt=None, max_retries=1, delay=5, days=24-1):
     
     Returns:
          A list of floats representing daily Google Trends values for "Bitcoin".
-    """
-    cache_file = GOOGLE_TRENDS_CACHE_FILE
-    cache_dict = load_json_cache(cache_file)
-    
+    """    
     if end_dt is not None:
         # Floor end_dt to the day (set hour, minute, second, microsecond to zero)
         key_dt = end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
         # Use a cache key based on the day
-        key = f"google-trends-{key_dt.strftime('%Y-%m-%d')}-days={days}"
+        key = 0
+        cache_dict = load_json_cache("google_trends_cache", topic, key_dt)
     else:
         # If no end_dt is provided, we do not cache because the day is still in progress.
         key = None
@@ -525,17 +505,17 @@ def fetch_google_trends(end_dt=None, max_retries=1, delay=5, days=24-1):
     retries = 0
     while retries < max_retries:
         try:
-            pytrends.build_payload(["Bitcoin"], cat=0, timeframe=tf_str, geo="", gprop="")
+            pytrends.build_payload([topic], cat=0, timeframe=tf_str, geo="", gprop="")
             df = pytrends.interest_over_time()
             if not df.empty:
                 # Ensure daily data by converting the index to date strings and getting the corresponding values.
                 # Typically, for a multi-day timeframe, Google Trends returns daily data.
                 daily_values = []
                 for dt in df.index:
-                    daily_values.append(float(df.loc[dt, "Bitcoin"]))
+                    daily_values.append(float(df.loc[dt, topic]))
                 # If caching is enabled (end_dt provided), store the array.
                 if key is not None:
-                    save_json_cache(cache_file, {key: daily_values})
+                    save_json_cache("google_trends_cache", topic, key_dt, {key: daily_values})
                     logger.info(f"[fetch_google_trends] Stored daily values for key={key} with {len(daily_values)} points.")
                 return daily_values
             else:
@@ -566,21 +546,20 @@ def fetch_google_trends(end_dt=None, max_retries=1, delay=5, days=24-1):
 ###############################################################################
 # fetch_santiment_data
 ###############################################################################
-def fetch_santiment_data(end_dt=None, only_look_in_cache = False):
+def fetch_santiment_data(end_dt=None, topic="bitcoin", only_look_in_cache = False):
     """
     We fetch last 3 days from end_dt floored hour or now floored.
     store => input_cache/santiment_data_cache.json
     """
-    cache_file = "input_cache/santiment_data_cache.json"
-    cache_dict = load_json_cache(cache_file)
-
     if end_dt is None:
         dt_now = datetime.datetime.now().replace(minute=0, second=0, microsecond=0)
         key_dt = dt_now
     else:
         key_dt = end_dt.replace(minute=0, second=0, microsecond=0)
 
-    key = f"santiment-{key_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+    cache_dict = load_json_cache("santiment_data_cache", topic, key_dt)
+    
+    key = key_dt.hour
 
     if key in cache_dict:
         logger.info(f"[fetch_santiment_data] Using cache => {key}")
@@ -618,7 +597,7 @@ def fetch_santiment_data(end_dt=None, only_look_in_cache = False):
     for metric in metrics:
         field = f'''
         {metric}: getMetric(metric: "{metric}") {{
-            timeseriesData(slug: "bitcoin", from: "{from_iso}", to: "{to_iso}", interval: "1d") {{
+            timeseriesData(slug: "{topic}", from: "{from_iso}", to: "{to_iso}", interval: "1d") {{
                 datetime
                 value
             }}
@@ -657,7 +636,7 @@ def fetch_santiment_data(end_dt=None, only_look_in_cache = False):
                 if np.isnan(cached_results[metric]):
                     cached_results[metric] = "Null"
                     
-            save_json_cache(cache_file, {key: cached_results})
+            save_json_cache("santiment_data_cache", topic, key_dt, {key: cached_results})
             
         except Exception as e:
             # Check for rate-limiting (HTTP 429)
@@ -684,38 +663,31 @@ def fetch_santiment_data(end_dt=None, only_look_in_cache = False):
 ###############################################################################
 # fetch_reddit_sentiment
 ###############################################################################
-def fetch_reddit_sentiment(dt: datetime.datetime = None):
+def fetch_reddit_sentiment(dt: datetime.datetime = None, topic="Bitcoin"):
     """
     If dt= None => current time => floor => key => fetch live.
     If dt => floor => if found => return. If not => find nearest, if not => fetch new => store as now floored.
     """
-    cache_file = REDDIT_SENTIMENT_CACHE_FILE
-    cache_data = load_json_cache(cache_file)
-
     if dt is None:
         dt_now = datetime.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
-        key = dt_now.strftime("%Y-%m-%d %H:%M:%S")
     else:
-        dt_floor = dt.replace(minute=0, second=0, microsecond=0)
-        key = dt_floor.strftime("%Y-%m-%d %H:%M:%S")
+        dt_now = dt.replace(minute=0, second=0, microsecond=0)
+    key = dt_now.hour
 
+    cache_data = load_json_cache("reddit_sentiment_cache", topic, dt_now)
+    
     if f"reddit-{key}" in cache_data:
         logger.info(f"[fetch_reddit_sentiment] Using cache => reddit-{key}")
         return float(cache_data[f"reddit-{key}"])
 
+    # Not found => if dt is not None, find one in the same day
     if dt is not None:
-        logger.info(f"[fetch_reddit_sentiment] Not found => check nearest => reddit-{key}")
-        nearest = find_nearest_hour_key(cache_data, dt_floor)
-        if nearest:
-            best_key = f"reddit-{nearest}"
-            logger.info(f"[fetch_reddit_sentiment] nearest => {best_key}")
-            return float(cache_data[best_key])
-        else:
-            logger.info("[fetch_reddit_sentiment] no parseable => fallback => fetch now")
+        for key, value in cache_data.items():
+            return float(value)
 
     # fallback => fetch live => store under now floored
     dt_now = datetime.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
-    newkey = f"reddit-{dt_now.strftime('%Y-%m-%d %H:%M:%S')}"
+    newkey = dt_now.hour
     logger.info(f"[fetch_reddit_sentiment] fallback fetch => store => {newkey}")
 
     if not (REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET and REDDIT_USER_AGENT):
@@ -728,7 +700,7 @@ def fetch_reddit_sentiment(dt: datetime.datetime = None):
                 client_secret=REDDIT_CLIENT_SECRET,
                 user_agent=REDDIT_USER_AGENT
             )
-            subreddit = reddit.subreddit("Bitcoin")
+            subreddit = reddit.subreddit(topic)
             posts = list(subreddit.new(limit=20))
             posts_text = [post.title + " " + post.selftext for post in posts]
             avg_sent = compute_average_sentiment(posts_text)
@@ -736,7 +708,7 @@ def fetch_reddit_sentiment(dt: datetime.datetime = None):
             logger.error(f"Reddit API error: {e}")
             avg_sent = 0.0
 
-    save_json_cache(cache_file, {newkey: avg_sent})
+    save_json_cache("reddit_sentiment_cache", topic, dt_now, {newkey: avg_sent})
     return avg_sent
 
 def analyze_news_sentiment(news_articles):
@@ -749,7 +721,7 @@ def analyze_news_sentiment(news_articles):
         return np.nan
 
     # 1) Load the cache
-    cache_data = load_json_cache(NEWS_ANALYZE_CACHE_FILE)
+    cache_data = load_json_cache("news_analyze_cache", None, None)
 
     # 2) Build a stable string from the articles, then hash it
     articles_str = json.dumps(news_articles, sort_keys=True)
@@ -774,6 +746,6 @@ def analyze_news_sentiment(news_articles):
     avg_sentiment = compute_average_sentiment(text_list)
 
     # 5) Store in cache
-    save_json_cache(NEWS_ANALYZE_CACHE_FILE, {articles_hash: avg_sentiment})
+    save_json_cache("news_analyze_cache", None, None, {articles_hash: avg_sentiment})
 
     return avg_sentiment

@@ -121,20 +121,21 @@ class HistoricalTradingBot(TradingBot):
     def fetch_order_book(self, symbol="BTCEUR", limit=20, dt=None):
         return super().fetch_order_book(symbol, limit, dt or self.current_datetime)
 
-    def fetch_news_data(self, days=1, end_dt=None):
-        return super().fetch_news_data(days, end_dt or self.current_datetime)
+    def fetch_news_data(self, days=1, topic="Bitcoin", end_dt=None):
+        return super().fetch_news_data(days, topic, end_dt or self.current_datetime)
 
-    def fetch_google_trends(self, end_dt=None):
-        return super().fetch_google_trends(end_dt or self.current_datetime)
+    def fetch_google_trends(self, end_dt=None, topic="Bitcoin"):
+        return super().fetch_google_trends(end_dt or self.current_datetime, topic)
 
-    def fetch_santiment_data(self, end_dt=None, only_look_in_cache=False):
+    def fetch_santiment_data(self, end_dt=None, topic="bitcoin", only_look_in_cache=False):
         return super().fetch_santiment_data(
             end_dt or self.current_datetime,
+            topic,
             BLOCK_SANTIMENT_FETCHING
         )
 
-    def fetch_reddit_sentiment(self, dt=None):
-        return super().fetch_reddit_sentiment(dt or self.current_datetime)
+    def fetch_reddit_sentiment(self, dt=None, topic="Bitcoin"):
+        return super().fetch_reddit_sentiment(dt or self.current_datetime, topic)
     
     def get_aggregated_signal(
         self,

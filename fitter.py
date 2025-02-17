@@ -344,6 +344,7 @@ class Trainer:
         )
         self.logger.info(f"Start LSTM training epochs={self.epochs}, batch_size={self.batch_size}")
 
+        # DEBUG:
         self.model.fit(
             x=[
                 X_5m_train[:500], X_15m_train[:500], X_1h_train[:500],
