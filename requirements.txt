@@ -12,3 +12,4 @@ portalocker
 pytrends
 graphviz
 pydot
+tensorflow-addons

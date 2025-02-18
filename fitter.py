@@ -57,7 +57,7 @@ class Trainer:
         ta_dim=63,
         signal_dim=11,
         epochs=600,
-        batch_size=64,
+        batch_size=32,
         apply_scaling=True,
         train_ratio=0.7,
         val_ratio=0.2,
@@ -417,7 +417,7 @@ class Trainer:
             state_dim=state_dim,
             gamma=0.99,
             lr=0.001,
-            batch_size=64,
+            batch_size=32,
             max_memory=len(transitions)+1,
             epsilon_start=0.0,  # offline => no exploration
             epsilon_min=0.0,
@@ -473,7 +473,7 @@ def parse_args():
     parser.add_argument("--model_out", type=str, default="models/advanced_lstm_model.keras",
                         help="File path for the LSTM model.")
     parser.add_argument("--epochs", type=int, default=600, help="LSTM epochs.")
-    parser.add_argument("--batch_size", type=int, default=64, help="LSTM batch size.")
+    parser.add_argument("--batch_size", type=int, default=32, help="LSTM batch size.")
     parser.add_argument("--no_scale", action="store_true",
                         help="Disable feature scaling.")
     parser.add_argument("--skip_lstm", action="store_true",
