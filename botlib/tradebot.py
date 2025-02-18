@@ -3,13 +3,10 @@
 tradebot.py
 
 TradingBot class that ties it all together:
-- Initialization (Binance client, local model, advanced LSTM, RL agent)
-- Data fetching (calls out to datafetchers.py)
-- Technical indicators (calls out to indicators.py)
-- Position management (paper or live) with 0.1% fee
-- RL-based action decisions (Uses DQN)
-
-Keeps all aggregator logic intact.
+- Uses a multi-output LSTM (10 outputs).
+- Runs every 20 minutes (STEP_INTERVAL_MINUTES).
+- RL uses single-step reward => each step is one transition.
+- RL state includes the 10 LSTM outputs plus 2 equity fractions = 12-dim.
 """
 
 import os
@@ -29,6 +26,7 @@ from .environment import (
     BINANCE_API_KEY,
     BINANCE_API_SECRET,
     GPT_CACHE_FILE,
+    NUM_FUTURE_STEPS,
     get_logger
 )
 from .datafetchers import (
@@ -114,7 +112,7 @@ class TradingBot:
         self.trade_log_file = "output/txs.csv"
         self._initialize_trade_log()
         
-        # load the scalers that we fitted in training
+        # Load the scalers that we fitted in training
         try:
             self.model_scaler = ModelScaler.load("models/scalers.pkl")
             self.logger.info("Loaded model scalers from models/scalers.pkl.")
@@ -128,30 +126,25 @@ class TradingBot:
             self.current_position = None
         self.last_log_data = {}
 
-        # New DQN agent for advanced RL:
-        # Example state_dim=4: [final_signal/100, atr%, BTC fraction, EUR fraction]
-        self.rl_state_dim = 4
+        # DQN Agent => now the state_dim = 10 (multi-output) + 2 (ATR, BTC%, EUR%) = 13
+        self.rl_state_dim = NUM_FUTURE_STEPS + 3
         self.rl_agent = DQNAgent(
-            state_dim=self.rl_state_dim,
-            gamma=0.99,
-            lr=0.0005,
-            batch_size=32,
-            max_memory=10000
+            state_dim=self.rl_state_dim
         )
 
-        self.last_equity = None  # for PnL-based reward
+        self.last_equity = None  # for single-step reward
 
-        # Multi-timeframe LSTM model config
-        self.model_5m_window = 241     # how many bars for 5m
-        self.model_15m_window = 241    # how many bars for 15m
-        self.model_1h_window = 241     # how many bars for 1h
-        self.num_features_per_bar = 9  # e.g. [open, high, low, close, volume, quote_volume, trades, taker_base_volume, taker_quote_volume]
+        # Multi-timeframe LSTM model config => must have 10 outputs
+        self.model_5m_window = 241
+        self.model_15m_window = 241
+        self.model_1h_window = 241
+        self.num_features_per_bar = 9
 
-        self.santiment_dim = 12        # Santiment features
-        self.context_ta_dim = 63       # TA features (21 per timeframe => 63 total)
-        self.context_sig_dim = 11      # 11 signals for price, google, local_gpt, equity, etc.
+        self.santiment_dim = 12
+        self.context_ta_dim = 63
+        self.context_sig_dim = 11
 
-        # Load advanced input LSTM model
+        # Load advanced LSTM model (which has 10 outputs!)
         self.advanced_model = load_advanced_lstm_model(
             model_5m_window=self.model_5m_window,
             model_15m_window=self.model_15m_window,
@@ -162,17 +155,13 @@ class TradingBot:
             signal_dim=self.context_sig_dim
         )
         
-        # Delete all files ending with .lock and .tmp in input_cache:
-        for file in Path("input_cache").glob("*.lock"):
-            try:
-                file.unlink()
-            except Exception as e:
-                print(f"Error deleting {file}: {e}")
-        for file in Path("input_cache").glob("*.tmp"):
-            try:
-                file.unlink()
-            except Exception as e:
-                print(f"Error deleting {file}: {e}")
+        # Clean up old .lock / .tmp from input_cache
+        for extension in ['*.lock', '*.tmp']:
+            for file in Path("input_cache").rglob(extension):
+                try:
+                    file.unlink()
+                except Exception as e:
+                    print(f"Error deleting {file}: {e}")
 
     def _initialize_trade_log(self):
         """
@@ -190,9 +179,6 @@ class TradingBot:
             self.logger.error(f"Error initializing trade log: {e}")
 
     def save_gpt_cache(self):
-        """
-        Save updated GPT cache to disk each iteration.
-        """
         try:
             with open(GPT_CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.gpt_cache, f, indent=2)
@@ -200,7 +186,7 @@ class TradingBot:
             self.logger.error(f"Cannot save GPT cache: {e}")
 
     ###########################################################################
-    # Overriden methods for backtesting or live usage
+    # Overriden methods for data fetching
     ###########################################################################
     
     def fetch_klines(self, symbol="BTCEUR", interval=Client.KLINE_INTERVAL_5MINUTE, limit=241, end_dt:datetime.datetime=None):
@@ -249,40 +235,39 @@ class TradingBot:
         )
 
     ###########################################################################
-    # LSTM Inference (5 inputs) + aggregator
+    # LSTM multi-output Inference
     ###########################################################################
-    def get_input_signal(self, arr_5m, arr_15m, arr_1h, arr_google_trend, arr_santiment, arr_ta, arr_ctx):
+    def get_input_signal(
+        self, arr_5m, arr_15m, arr_1h,
+        arr_google_trend, arr_santiment,
+        arr_ta, arr_ctx
+    ):
         """
-        Inference using the advanced multi-input LSTM model:
-          - arr_5m  -> shape (1, 241, 9)
-          - arr_15m -> shape (1, 241, 9)
-          - arr_1h  -> shape (1, 241, 9)
-          - arr_google_trend -> shape (1,24,1)
-          - arr_santiment -> shape (1,12)
-          - arr_ta   -> shape (1,63)
-          - arr_ctx  -> shape (1,11)
-
-        Returns a float in [-100, 100].
+        The advanced_model has 10 outputs => shape (1,10).
+        We'll produce a vector of length 10 in [-100, 100].
         """
         s_5m, s_15m, s_1h, s_gt, s_sa, s_ta, s_ctx = prepare_for_model_inputs(
-            arr_5m, arr_15m, arr_1h, arr_google_trend, arr_santiment, arr_ta, arr_ctx, self.model_scaler
+            arr_5m, arr_15m, arr_1h,
+            arr_google_trend, arr_santiment,
+            arr_ta, arr_ctx,
+            self.model_scaler
         )
-        
         try:
             raw_pred = self.advanced_model.predict(
                 [s_5m, s_15m, s_1h, s_gt, s_sa, s_ta, s_ctx],
                 verbose=0
-            )[0][0]
-            signal = max(min(raw_pred * 100, 100), -100)
-            return signal
+            )  # shape => (1,10)
+            signals_10 = raw_pred[0] * 100.0  # shape(10,)
+            # clip to [-100,100]
+            signals_10 = np.clip(signals_10, -100.0, 100.0)
+            return signals_10
         except Exception as e:
             self.logger.error(f"5-input LSTM predict error: {e}")
-            return 0.0
+            return np.zeros((10,), dtype=np.float32)
 
     ###########################################################################
-    # Aggregation
+    # Aggregator => returns 10 signals
     ###########################################################################
-    
     def get_aggregated_signal(
         self,
         current_utc_time,
@@ -300,17 +285,14 @@ class TradingBot:
         use_model_pred = True
     ):
         """
-        A 'mega' aggregator that:
-        ) Analyzes news with GPT
-        ) Builds a big textual prompt incl. multi-timeframe TAs (all 21 TAs each for 5m,15m,1h),
-            order book ratio, google trends, santiment, reddit sentiment, etc.
-        ) Generates GPT signals
-        ) Computes TAs for each timeframe => 63 features
-        ) Builds an 11-feature context vector
-        ) Feeds all inputs (3 time-series arrays + 63 TA + 11 context + etc...) into LSTM => final signal
-        ) Returns final_signal, local_gpt_signals, news_signal plus arrays for logging, plus the aggregator prompt
-        """
+        We'll produce an array of shape(10,) from the advanced LSTM model (multi-output).
+        We'll still produce local GPT signals, news sentiment, etc.
 
+        Return:
+            final_signals_10, local_gpt_signals, news_signal, arr_5m, ...
+            aggregator_prompt
+        """
+        
         # ) News GPT
         newsapi_sent = analyze_news_sentiment(news_articles)
         
@@ -518,8 +500,8 @@ class TradingBot:
         arr_ctx_11 = np.array(ctx_11_list, dtype=np.float32).reshape((1, self.context_sig_dim))
 
         if use_model_pred:
-            # ) Multi-input LSTM => final_pred
-            final_pred = self.get_input_signal(
+            # ) Multi-input LSTM => final_preds
+            final_preds = self.get_input_signal(
                 arr_5m,    # shape=(1,241,9)
                 arr_15m,   # shape=(1,241,9)
                 arr_1h,    # shape=(1,241,9)
@@ -528,19 +510,18 @@ class TradingBot:
                 arr_ta_63, # shape=(1,63)
                 arr_ctx_11 # shape=(1,11)
             )
-            self.logger.info(f"[Aggregator] Model pred => {final_pred:.2f}")
+            self.logger.info(f"[Aggregator] Model preds => {final_preds:.2f}")
         else:
-            final_pred = 0 #
-
-        # ) Combine GPT average with final_pred
-        # gpt_avg = sum(local_signals)/len(local_signals)
-        # final_signal = 0.5*final_pred + 0.5*gpt_avg
-        # self.logger.info(f"[Aggregator] final combined => {final_signal:.2f}")
+            final_preds = np.zeros((10,), dtype=np.float32)
 
         # Return final signal plus everything needed by run_cycle
-        return final_pred, local_signals, newsapi_sent, arr_5m, arr_15m, arr_1h, arr_google_trend, arr_santiment, arr_ta_63, arr_ctx_11, aggregator_prompt
+        return final_preds, local_signals, newsapi_sent, arr_5m, arr_15m, arr_1h, arr_google_trend, arr_santiment, arr_ta_63, arr_ctx_11, aggregator_prompt
 
 
+    ###########################################################################
+    # Indicators, etc. 
+    ###########################################################################
+    
     def compute_timeframe_tas(self, klines):
         """
         Compute the 21 TAs for a single timeframe. 
@@ -673,8 +654,9 @@ class TradingBot:
             eur_equity_pct
         ]
 
+
     ###########################################################################
-    # Balances & PnL
+    # Balances, PnL, reward
     ###########################################################################
     def get_account_balances(self):
         if PAPER_TRADING:
@@ -696,10 +678,13 @@ class TradingBot:
         return balances.get("EUR", 0) + balances.get("BTC", 0) * price
 
     def compute_reward(self, current_equity):
+        """
+        Single-step reward => fractional change in equity from previous step.
+        """
         if self.last_equity is None:
             self.last_equity = current_equity
             return 0.0
-        reward = current_equity - self.last_equity
+        reward = (current_equity - self.last_equity) / max(self.last_equity, 1e-9)
         self.last_equity = current_equity
         return reward
 
@@ -911,35 +896,61 @@ class TradingBot:
             self.logger.error(f"Trade log error: {e}")
 
     ###########################################################################
-    # Build RL State Vector (for the new DQNAgent, if used)
+    # RL State => includes 10 signals + 2 equity fractions
     ###########################################################################
-    def build_rl_state(self, final_signal, atr_percent, balances, price):
+    def build_rl_state(self, signals_10, atr_percent, balances, price):
         """
-        Example RL state of shape (4,):
-          [final_signal/100, atr_percent, BTC fraction, EUR fraction]
+        signals_10 => np.array of shape (10,) in [-100,100].
+        We'll normalize them to [-1,1], then append [atr_percent, btc_frac, eur_frac].
+
+        Final shape => (13,):
+        [ s_norm[0], s_norm[1], ..., s_norm[9],    # normalized signals
+            atr_percent,
+            btc_frac,
+            eur_frac
+        ]
         """
-        fs_norm = np.clip(final_signal/100.0, -1.0, 1.0)
-        ap = 0.0 if (atr_percent is None) else atr_percent
+        # 1) normalize the 10 signals from [-100,100] => [-1,1]
+        s_norm = np.array(signals_10) / 100.0
+        
+        # 2) compute equity fractions
         eq_btc_val = balances["BTC"] * price
         eq_eur_val = balances["EUR"]
         tot_eq = eq_btc_val + eq_eur_val
+
         if tot_eq <= 0:
-            return np.array([fs_norm, ap, 0.0, 0.0], dtype=np.float32)
-        btc_frac = eq_btc_val / tot_eq
-        eur_frac = eq_eur_val / tot_eq
-        return np.array([fs_norm, ap, btc_frac, eur_frac], dtype=np.float32)
+            # fallback if no equity
+            btc_frac = 0.0
+            eur_frac = 1.0
+        else:
+            btc_frac = eq_btc_val / tot_eq
+            eur_frac = eq_eur_val / tot_eq
+
+        # 3) assemble final state
+        #    shape => (10 + 1 + 2) = 13
+        state_vec = np.concatenate([
+            s_norm,                    # 10 LSTM outputs in [-1,1]
+            [atr_percent],            # raw or scaled
+            [btc_frac, eur_frac]
+        ]).astype(np.float32)
+
+        return state_vec
 
     ###########################################################################
-    # Main Cycle
+    # run_cycle => each 20min step
     ###########################################################################
     def run_cycle(self):
         """
-        Gathers data, calls aggregator => final_signal, picks an RL action,
-        trades, logs result. Integrates DQN with transitions. 
+        Single-step RL approach:
+          - aggregator => 10 LSTM signals
+          - build RL state => dimension=12
+          - RL action => {LONG, SHORT, HOLD}
+          - trade, measure reward from single-step equity change
+          - store transition, train
         """
         self.logger.info("=== Starting Trading Cycle ===")
         try:
-            # 1) Current market price
+            # 1) fetch current price
             current_price = self.fetch_price_at_hour(self.symbol)
             if current_price is None:
                 self.logger.error("No current price => abort.")
@@ -949,10 +960,10 @@ class TradingBot:
             if PAPER_TRADING:
                 self.manage_open_position_paper(current_price)
 
-            # 2) fetch 241-bar klines for 5m,15m,1h + other data
-            klines_5m = self.fetch_klines(interval=Client.KLINE_INTERVAL_5MINUTE, limit=self.model_5m_window)
-            klines_15m= self.fetch_klines(interval=Client.KLINE_INTERVAL_15MINUTE, limit=self.model_15m_window)
-            klines_1h = self.fetch_klines(interval=Client.KLINE_INTERVAL_1HOUR, limit=self.model_1h_window)
+            # 2) gather data for aggregator
+            klines_5m = self.fetch_klines(interval=Client.KLINE_INTERVAL_5MINUTE, limit=241)
+            klines_15m= self.fetch_klines(interval=Client.KLINE_INTERVAL_15MINUTE, limit=241)
+            klines_1h = self.fetch_klines(interval=Client.KLINE_INTERVAL_1HOUR, limit=241)
 
             news_data_res = self.fetch_news_data()
             ob_data = self.fetch_order_book(self.symbol, limit=20)
@@ -963,9 +974,9 @@ class TradingBot:
             total_equity  = self.get_total_equity(current_price, balances)
             reward        = self.compute_reward(total_equity)
 
-            # 3) aggregator => final_signal
+            # 3) aggregator => signals_10
             (
-                final_signal,
+                signals_10,
                 local_signals,
                 news_signal,
                 arr_5m,
@@ -988,35 +999,42 @@ class TradingBot:
                 balances=balances,
                 santiment_data=santiment_data,
                 reddit_sent=reddit_sent,
-                use_real_gpt = True,
-                use_model_pred = True
+                use_real_gpt=True,
+                use_model_pred=True
             )
 
-            # 4) RL-based decision
+            # 4) RL action
+            
             atr_val = 0.0
             if klines_15m and len(klines_15m) == 241:
                 atr_v = compute_atr_from_klines(klines_15m, 14)
                 atr_val = atr_v/current_price if atr_v else 0.0
-
-            state_vec = self.build_rl_state(final_signal, atr_val, balances, current_price)
-            action = self.rl_agent.select_action(state_vec)  # {LONG, SHORT, HOLD}
+            action = self.rl_agent.select_action(
+                self.build_rl_state(signals_10, atr_val, balances, current_price)
+            )
 
             # 5) Execute
-            self.process_trade_signal(action, final_signal, current_price, atr_val)
+            self.process_trade_signal(action, float(signals_10[0]), current_price, atr_val)
+
             new_balances = self.get_account_balances()
             new_equity   = self.get_total_equity(current_price, new_balances)
+            next_state = self.build_rl_state(signals_10, atr_val, new_balances, current_price)
 
-            # 6) Store RL transition + train
-            next_state_vec = self.build_rl_state(final_signal, atr_val, new_balances, current_price)
-            done = False  # for now, always false in live/paper
-            self.rl_agent.store_transition(state_vec, action, reward, next_state_vec, done)
+            done = False  # no terminal condition
+            self.rl_agent.store_transition(
+                state = self.build_rl_state(signals_10, atr_val, balances, current_price),
+                action= action,
+                reward= reward,
+                next_state= next_state,
+                done= done
+            )
             self.rl_agent.train_step()
             if threading.current_thread() is threading.main_thread():
                 self.rl_agent.save()
-            
+
             self.save_gpt_cache()
 
-            # 7) Log everything
+            # 6) Log
             self.last_log_data = {
                 "timestamp": datetime.datetime.utcnow().isoformat(),
                 "current_price": float(current_price),
@@ -1031,18 +1049,15 @@ class TradingBot:
                 "santiment": santiment_data,
                 "local_gpt_signals": local_signals,
                 "news_signal": news_signal,
-                "final_signal": float(final_signal),
+                "final_signal": signals_10.tolist(),   # 10 signals
                 "action": action,
                 "balances": new_balances,
                 "total_equity": float(new_equity),
-                "atr_percent": atr_val,
-                "aggregator_prompt": aggregator_prompt,
-                "reward": reward
+                "reward": float(reward)
             }
 
         except Exception as e:
             self.logger.error(f"Trading cycle error: {e}")
             self.logger.error(traceback.format_exc())
-            
-        self.logger.info("=== Trading Cycle Complete ===\n")
 
+        self.logger.info("=== Trading Cycle Complete ===\n")

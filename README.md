@@ -1,25 +1,36 @@
 # DeepTrade
 
-DeepTrade is a Python-based prototype for quantitative cryptocurrency (*now Bitcoin (BTC) - Solana (SOL) to come*) trading and research. It combines historical backtesting, multi-timeframe LSTM modeling, GPT-based sentiment analysis, and optional offline Reinforcement Learning (DQN).
+DeepTrade is a Python-based prototype for quantitative cryptocurrency (*now Bitcoin (BTC) - Solana (SOL) to come*) trading and research. It combines **20-minute interval historical backtesting**, **multi‐output (10‐step) LSTM** modeling, GPT-based sentiment analysis, and an **offline single‐step Reinforcement Learning (DQN)** pipeline.
 
-## Multi-Timeframe LSTM-Transformer Model Architecture
+---
+
+## Multi-Timeframe, Multi‐Output LSTM Model Architecture
 
 <div align="center"><center><img src="models/advanced_lstm_model_architecture.png" alt="Multi-Timeframe LSTM-Transformer Model Architecture" width="300"></center></div>
 
-Advanced multi-input deep learning architecture combining residual LSTM layers, Transformer-style self-attention mechanisms, and dense feed-forward networks. The model processes multiple time-series inputs (e.g., 5m, 15m, 1h, Google Trends and Santiment data) alongside sentiment analysis, technical indicators, and market signals. Each time-series branch undergoes LSTM-based encoding, followed by Transformer layers for capturing sequential dependencies. The encoded outputs are then merged with contextual inputs (Santiment, TA indicators, and signal data), forming a unified latent representation, which is further refined through fully connected layers to produce a signal.
+This advanced multi-input deep learning model combines **residual LSTM layers**, **Transformer-style self-attention**, and **dense feed-forward** networks. The model takes multiple time-series inputs (e.g., 5m, 15m, 1h, plus Google Trends and Santiment data) alongside sentiment signals, technical indicators, and market context.
 
-## Deep Q-Network (DQN) reinforcement learning
+- The model produces **10 outputs** (`y_1..y_10`), each corresponding to a future horizon at +1 step through +10 steps (each step is 20 minutes).  
+- We skip rows where all 10 future steps are not available.  
 
-After the neural network model generates a signal, it is processed by the **Deep Q-Network (DQN) reinforcement learning agent** defined in `rl.py`. The **DQNAgent** is responsible for translating the model's encoded market state into a discrete trading action: **LONG, SHORT, or HOLD**. 
+By training on these multi-step forecasts, the model can capture short-term price trajectories in 20‐minute increments.
 
-The agent achieves this by:
-1. Maintaining a **replay buffer** that stores past state-action-reward transitions, enabling experience replay.
-2. Using a **feed-forward neural network** to approximate Q-values for each possible action.
-3. Implementing an **epsilon-greedy policy** for action selection, balancing exploration (random actions) and exploitation (choosing the best predicted action).
-4. Periodically **updating a target network** to stabilize learning.
-5. **Training via mini-batch gradient descent**, where it learns to approximate the best action-value function using stored experiences.
+---
 
-As the agent receives the processed signal, it evaluates the **expected future rewards** associated with each possible action, refines its decision-making process through reinforcement learning, and ultimately selects the best trading action to execute in the live market.
+## Single‐Step Deep Q-Network (DQN) Reinforcement Learning
+
+After the neural network model generates 10 predicted returns (`y_1..y_10`), an **RL agent** (DQN) uses these predicted multi-horizon signals (and possibly other features) to decide a **LONG, SHORT, or HOLD** action at **every single 20‐minute bar**.
+
+1. **Single-step reward**: The RL agent collects a reward each step (20 minutes) based on immediate price changes (or PnL).  
+2. **Replay buffer**: Stores past transitions (state, action, reward, next_state) to enable offline training.  
+3. **DQN**:
+   - Feed-forward network approximates Q-values for each action (LONG, SHORT, HOLD).
+   - Epsilon-greedy policy for exploration vs. exploitation.
+   - Periodic target network updates for stability.
+
+**Goal**: Maximize cumulative reward (e.g., % returns) over many 20‐minute trading steps.
+
+---
 
 ## Project Status
 
@@ -29,66 +40,73 @@ As the agent receives the processed signal, it evaluates the **expected future r
 - **Contributions, issues, and suggestions are welcome!**
 
 > **Disclaimer:** This project is in active development and might contain bugs. There is no guarantee of profitability or correctness. Use for learning and experimentation.
+---
 
 ## Overview
 
 ### Major Components
 
 1. **`backtester.py`**
-   - Simulates historical trading from a specified start date to end date.
-   - Generates scenario-based CSV logs (e.g., `backtest_result_local_gpt_1.csv`) to observe how different signals would have performed.
-   - Builds a supervised learning dataset in `training_data.csv` for an advanced multi-input LSTM model (after a +3h future price offset).
+   - **Runs historical backtests in 20-minute increments** (configurable via `STEP_INTERVAL_MINUTES`).
+   - For each bar, it fetches data, updates the bot, and logs scenario-based CSV outputs (like `backtest_result_local_gpt_1.csv`).
+   - Builds **multi-output training data** (`training_data.csv`) with columns `y_1..y_10`, each offset by 1..10 steps (20 minutes per step).
+   - Also logs RL transitions (single-step reward) in `rl_transitions.csv`.
 
 2. **`fitter.py`**
-   - Trains a multi-input LSTM model using the `training_data.csv` generated by the backtester.
-   - Saves the trained model to `lstm_model.h5`.
+   - Trains a **multi-output LSTM** from `training_data.csv`.
+   - Optionally trains a **DQN** (offline) using `rl_transitions.csv`.
 
 3. **`trader.py`**
-   - Executes live trading using the trained LSTM model.
-   - Incorporates real-time data and GPT-based sentiment analysis to make trading decisions.
+   - Executes **live** trading using the LSTM model and optional GPT-based sentiment signals, every 20 minutes.
+   - If PAPER_TRADING is `True`, simulates trades locally. Otherwise, attempts real trades on the configured exchange.
 
 4. **`merge_training_data.py`**
-   - Merges multiple `training_data.csv` files from different backtests into a single dataset for comprehensive training.
+   - Merges multiple `training_data.csv` files (from different backtests) into one for more comprehensive training.
 
 5. **`fix_tf_gpu.py`**
-   - Utility script to address TensorFlow GPU issues on Windows systems.
+   - Utility script for resolving TensorFlow GPU issues on Windows.
+
+---
 
 ## Additional Important Directories and Files
 
-- **`.env.copy`** - Example environment configuration file. Rename this to `.env` and fill in your API keys and other required environment variables.
+- **`.env.copy`**  
+  Example environment configuration. Rename to `.env` and fill in your API keys (Binance, Santiment, etc.).
 
-- **`botlib/`** - Core library containing helper functions and modules for trading logic.
-  - **`tradebot.py`** - Defines the `TradingBot` class, handling data fetching, aggregation, RL state-building, and position management.
-  - **`environment.py`** - Manages shared environment variables and utilities, including logging.
-  - **`datafetchers.py`** - Contains functions to retrieve data from Binance, news APIs, Google Trends, and Santiment.
-  - **`input_preprocessing.py`** - Includes the `ModelScaler` class and helpers to scale inputs for the multi-timeframe LSTM model.
-  - **`indicators.py`** - Implements technical indicators like RSI, MACD, and Bollinger Bands.
-  - **`models.py`** - Loads local HuggingFace language models or OpenAI for sentiment analysis and constructs the LSTM model.
-  - **`rl.py`** - Implements a simple DQNAgent for RL-based action selection and manages offline training memory.
-  - **`nn_model.py`** - Defines neural network architectures and utilities for training and inference.
+- **`botlib/`**  
+  - **`tradebot.py`** — Core `TradingBot` class: handles data fetching, aggregator logic, RL state building.  
+  - **`environment.py`** — Shared environment variables and logging.  
+  - **`datafetchers.py`** — **Now caches per minute** instead of per hour, fetching from Binance, news, Google Trends, Santiment, etc.  
+  - **`input_preprocessing.py`** — Scales inputs for the multi-output LSTM. Also merges all LSTM outputs for RL if needed.  
+  - **`indicators.py`** — TA indicators (RSI, MACD, Bollinger, etc.).  
+  - **`models.py`** — LSTM model construction and loading.  
+  - **`rl.py`** — Single-step DQN agent logic (stores transitions, trains offline).  
 
-- **`models/`** - Stores trained machine learning models.
-  - **`advanced_lstm_model.keras`** - The saved multi-timeframe LSTM model, generated at runtime.
+- **`models/`** — Stores trained models, e.g. `advanced_lstm_model.keras`.  
 
-- **`output/`** - Stores all CSV outputs, including backtest logs, `training_data.csv`, and RL transitions.
+- **`output/`** — Contains CSV outputs from backtests (`*_gpt_1.csv`, etc.) and final signals.  
 
-- **`input_cache/`** - Cache for downloaded data (e.g., klines, news) to speed up repeated runs.
+- **`input_cache/`** — Caches downloaded data (klines, news) by minute. Speeds up repeated runs.  
 
-- **`debug/`** - Contains various logs or debugging information, such as GPT call logs and aggregator prompts.
+- **`debug/`** — Debugging logs or GPT prompts.  
 
-- **`training_data/`** - Stores raw and processed datasets used for training the models.
+- **`training_data/`** — CSV files for training.  
+  - `training_data.csv` with multi‐output columns `y_1..y_{10}`.  
+  - `rl_transitions.csv` for offline DQN.  
+
+---
 
 ## Setup and Installation
 
 ### Prerequisites
 
-- Python 3.6
+- Python 3.6 (or 3.7+)
 - Conda package manager
-- NVIDIA GPU with CUDA support (for GPU acceleration)
+- (Optional) NVIDIA GPU + CUDA for faster training
 
-### Installation Steps
+### Steps
 
-1. **Clone the Repository:**
+1. **Clone the Repo**
 
    ```bash
    git clone https://github.com/napzter13/DeepTrade.git
@@ -129,8 +147,10 @@ As the agent receives the processed signal, it evaluates the **expected future r
    python backtester.py
    ```
 
-   - Iterates historically hour by hour.
-   - Writes scenario CSVs to output/ and accumulates training data in training_data/training_data.csv.
+   - Iterates historically in 20-minute steps (default).
+   - Builds training_data.csv with columns:
+   - [timestamp, arr_5m, arr_15m, arr_1h, arr_google_trend, arr_santiment, arr_ta_63, arr_ctx_11, y_1 .. y_{10}].
+   - Also writes RL transitions in rl_transitions.csv using single-step reward.
 
 2. **Training the Model:**
 
@@ -140,8 +160,9 @@ As the agent receives the processed signal, it evaluates the **expected future r
    python fitter.py
    ```
 
-   - Reads from training_data.csv and trains a multi-input LSTM.
-   - You can also train an offline DQN if you have training_data/rl_transitions.csv.
+   - LSTM: Trains the multi‐output LSTM that predicts 10 future returns.
+   - RL: If rl_transitions.csv is present, trains an offline DQN that uses those transitions.
+   - Saves the LSTM model to models/advanced_lstm_model.keras (and DQN weights to rl_DQNAgent.weights.h5).
 
 3. **Live Trading:**
 
@@ -151,9 +172,9 @@ As the agent receives the processed signal, it evaluates the **expected future r
    python trader.py
    ```
 
-   - Instantiates TradingBot, does an immediate run, then schedules hourly runs.
-   - If PAPER_TRADING is set (in environment.py or .env), it simulates trades locally.
-   - Otherwise, it attempts real trades on your configured exchange.
+   - Runs the TradingBot logic in 20-minute intervals by default.
+   - Loads the multi‐output LSTM model, obtains predicted returns, and passes them to the RL agent to produce an action (LONG/SHORT/HOLD).
+   - If PAPER_TRADING=True, only simulates trades. Otherwise, attempts real trades via the Binance API.
 
 ## Contributing
 

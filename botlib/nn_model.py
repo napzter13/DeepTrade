@@ -2,6 +2,9 @@
 
 import tensorflow as tf
 from tensorflow.keras import layers
+from .environment import (
+    NUM_FUTURE_STEPS,
+)
 
 ################################################################################
 # 1) Residual LSTM block
@@ -133,9 +136,9 @@ def build_multi_timeframe_model(
     # More extended windows by default
     window_5m=241,
     feature_5m=9,
-    window_15m=240,
+    window_15m=241,
     feature_15m=9,
-    window_1h=240,
+    window_1h=241,
     feature_1h=9,
     window_google_trend=24,
     feature_google_trend=1,
@@ -147,7 +150,7 @@ def build_multi_timeframe_model(
     A multi-branch model with:
       - Big Residual LSTM layers + Transformer block per timeframe
       - Additional sub-networks for Santiment, TA, and signals
-      - Tanh final output
+      - Tanh final outputs
       - Minimally no dropout / no L2 to test overfitting
     """
 
@@ -256,9 +259,10 @@ def build_multi_timeframe_model(
     x2 = layers.Dense(256, activation='relu', name="final_dense1")(x_merged_signal)
     x2 = layers.Dense(128, activation='relu', name="final_dense2")(x2)
 
-    # Output layer: 'tanh'
+    # Output layer
     out = layers.Dense(
-        1, activation='tanh',
+        NUM_FUTURE_STEPS,                         # <--- 10 outputs
+        # activation='tanh',
         name="output"
     )(x2)
 

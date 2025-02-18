@@ -231,61 +231,100 @@ class ModelScaler:
 
 
     def fit_google_trend(self, X_google_trend):
+        """
+        Fits self.scaler_google_trend (StandardScaler) to the flattened 2D data of shape (N*24, 1).
+        If the entire column is NaN (so np.nanmean(...) is NaN), we replace those NaNs with 0.0 before fitting.
+        """
         if self.scaler_google_trend is None:
             self.scaler_google_trend = StandardScaler()
+
         if not hasattr(X_google_trend, "shape"):
             X_google_trend = np.array(X_google_trend, dtype=float)
-        if len(X_google_trend.shape) == 1:
+
+        # Force shape (N, 24, 1)
+        if X_google_trend.ndim == 1:
             X_google_trend = X_google_trend.reshape(-1, 24, 1)
-                
+        elif X_google_trend.ndim == 2 and X_google_trend.shape[1] == 24:
+            X_google_trend = X_google_trend.reshape(-1, 24, 1)
+
+        N, T, D = X_google_trend.shape  # expect (N,24,1)
+        flatten = X_google_trend.reshape((N*T, D))  # (N*24, 1)
+
+        # Compute a column mean ignoring NaNs
+        mean_value = np.nanmean(flatten, axis=0)  # shape: (1,)
+        # If the mean is NaN (entire column was NaN), fallback to 0.0
+        mean_value = np.where(np.isnan(mean_value), 0.0, mean_value)
+
+        # Impute NaNs with mean_value (which may be 0.0 if everything was NaN)
+        flatten = np.where(np.isnan(flatten), mean_value, flatten)
+
+        self.scaler_google_trend.fit(flatten)
+
+    def transform_google_trend(self, X_google_trend):
+        """
+        Transforms data by replacing any NaNs with the scaler’s mean_ if it’s valid,
+        or 0.0 if the scaler’s mean_ is NaN.
+        """
+        if not hasattr(X_google_trend, "shape"):
+            X_google_trend = np.array(X_google_trend, dtype=float)
+
+        # Force shape (N,24,1) similarly
+        if X_google_trend.ndim == 1:
+            X_google_trend = X_google_trend.reshape(-1, 24, 1)
+        elif X_google_trend.ndim == 2 and X_google_trend.shape[1] == 24:
+            X_google_trend = X_google_trend.reshape(-1, 24, 1)
+
         N, T, D = X_google_trend.shape
         flatten = X_google_trend.reshape((N*T, D))
-        # Use the scaler's mean if it exists; otherwise, compute it manually ignoring NaNs.
-        if hasattr(self.scaler_google_trend, 'mean_'):
-            mean_value = self.scaler_google_trend.mean_
-        else:
-            mean_value = np.nanmean(flatten, axis=0)  # shape: (D,)
-        flatten = np.where(np.isnan(flatten), mean_value, flatten)
-        self.scaler_google_trend.fit(flatten)
-        
-    def transform_google_trend(self, X_google_trend):
-        N,T,D = X_google_trend.shape
-        flatten = X_google_trend.reshape((N*T, D))
-        flatten = np.where(np.isnan(flatten), self.scaler_google_trend.mean_, flatten)
+
+        # scaler’s mean_ is shape (1,)
+        scaler_mean = self.scaler_google_trend.mean_
+        # If scaler_mean is NaN, fallback to 0.0
+        scaler_mean = np.where(np.isnan(scaler_mean), 0.0, scaler_mean)
+
+        # Replace NaN in the data with scaler_mean
+        flatten = np.where(np.isnan(flatten), scaler_mean, flatten)
+
         out = self.scaler_google_trend.transform(flatten)
-        return out.reshape((N,T,D))
+        return out.reshape((N, T, D))
     
     # =========================
     # Santiment => 12 separate StandardScalers
     # =========================
     def fit_santiment(self, X_santiment):
-        # Convert to array if needed
+        """
+        Fits a list of StandardScalers (one per column).
+        If the entire column is NaN, fallback to 0.0 for that column.
+        """
         if not hasattr(X_santiment, "shape"):
             X_santiment = np.array(X_santiment, dtype=float)
-        if len(X_santiment.shape) == 1:
+
+        # Ensure shape (N, D)
+        if X_santiment.ndim == 1:
             X_santiment = X_santiment.reshape(-1, 1)
-        
+
         N, D = X_santiment.shape
-        
-        # Lazily initialize if needed
+
         if self.scalers_santiment is None:
             self.scalers_santiment = [StandardScaler() for _ in range(D)]
-            
-        # Fit each scaler to the corresponding column
+
         for i in range(D):
             col_i = X_santiment[:, i:i+1]  # shape (N,1)
-            # If the scaler has already been fit, use its mean;
-            # otherwise compute the mean manually ignoring NaNs.
-            if hasattr(self.scalers_santiment[i], 'mean_'):
-                mean_val = self.scalers_santiment[i].mean_
-            else:
-                mean_val = np.nanmean(col_i, axis=0)  # shape (1,)
+
+            # Compute mean ignoring NaNs
+            mean_val = np.nanmean(col_i, axis=0)  # shape (1,)
+            # If entire column was NaN => fallback to 0.0
+            mean_val = np.where(np.isnan(mean_val), 0.0, mean_val)
+
+            # Impute
             col_imputed = np.where(np.isnan(col_i), mean_val, col_i)
+
             self.scalers_santiment[i].fit(col_imputed)
 
-
-    def transform_santiment(self, X_santiment):       
-        # Ensure 2D
+    def transform_santiment(self, X_santiment):
+        """
+        For each column, replace NaNs with that column’s StandardScaler mean_, or 0.0 if the mean_ is NaN.
+        """
         if not hasattr(X_santiment, "ndim"):
             X_santiment = np.array(X_santiment, dtype=float)
         if X_santiment.ndim < 2:
@@ -294,21 +333,22 @@ class ModelScaler:
         N, D = X_santiment.shape
         X_transformed = np.empty_like(X_santiment, dtype=float)
 
-        # Transform each column individually
         for i in range(D):
-            # Extract the column (shape: [N,])
+            # Extract the column (N,)
             col = X_santiment[:, i]
-            
-            # Replace any np.nan values with the mean computed by the scaler.
-            # Each StandardScaler instance has a `mean_` attribute (a scalar for 1D data).
-            col_imputed = np.where(np.isnan(col), self.scalers_santiment[i].mean_, col)
-            
-            # StandardScaler expects a 2D array, so reshape the column to (N, 1)
+
+            # If the scaler’s mean_ is NaN => fallback to 0.0
+            scaler_mean = self.scalers_santiment[i].mean_
+            if np.isnan(scaler_mean):
+                scaler_mean = 0.0
+
+            # Replace NaNs with the column’s mean (or 0.0)
+            col_imputed = np.where(np.isnan(col), scaler_mean, col)
+
+            # Transform using StandardScaler
             col_imputed_reshaped = col_imputed.reshape(-1, 1)
-            
-            # Transform the imputed column and flatten back to 1D.
             X_transformed[:, i] = self.scalers_santiment[i].transform(col_imputed_reshaped).flatten()
-        
+
         return X_transformed
 
     # =========================

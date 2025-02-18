@@ -10,7 +10,6 @@ Environment variables, global flags, and logging setup.
 
 import os
 import logging
-import schedule
 import nltk
 from dotenv import load_dotenv
 
@@ -34,6 +33,8 @@ MIXTRAL_MODEL_PATH = os.getenv("MIXTRAL_MODEL_PATH", "./models/mixtral")
 DEEPSEEK_MODEL_PATH = os.getenv("DEEPSEEK_MODEL_PATH", "./models/deepseek-v3")
 ADVANCED_MODEL_PATH = os.getenv("ADVANCED_MODEL_PATH", "models/advanced_lstm_model.keras")
 RL_MODEL_PATH = os.getenv("RL_MODEL_PATH", "models/rl_DQNAgent.weights.h5")
+STEP_INTERVAL_MINUTES = int(os.getenv("STEP_INTERVAL_MINUTES", 20))
+NUM_FUTURE_STEPS = int(os.getenv("NUM_FUTURE_STEPS", 10))
 
 # Make sure directories exist
 os.makedirs("debug", exist_ok=True)

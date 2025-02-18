@@ -1,35 +1,42 @@
 #!/usr/bin/env python3
 """
-tradebot.py
-Main runner for live/paper trading using the TradingBot class.
-Schedules an hourly run, just like the old monolith code's main().
+trader.py
+
+- Runs the TradingBot every STEP_INTERVAL_MINUTES (default=20).
+
+Usage:
+  python trader.py
 """
 
 import schedule
 import time
 import os
 
+from botlib.environment import (
+    STEP_INTERVAL_MINUTES
+)
+
+
 from botlib.tradebot import TradingBot
 
-
 def main():
-    os.system('cls')            # clear terminal Windows
+    os.system('cls' if os.name == 'nt' else 'clear')  # optional: clear terminal
     bot = TradingBot()
     bot.logger.info("Starting live/paper trading bot...")
 
-    # Run once now:
+    # Run once now immediately:
     bot.run_cycle()
 
-    # Then schedule e.g. hourly
-    schedule.every().hour.do(bot.run_cycle)
-    bot.logger.info("Bot scheduled to run hourly.")
+    # Then schedule every STEP_INTERVAL_MINUTES
+    schedule.every(STEP_INTERVAL_MINUTES).minutes.do(bot.run_cycle)
+    bot.logger.info(f"Bot scheduled to run every {STEP_INTERVAL_MINUTES} minutes.")
 
     try:
         while True:
             schedule.run_pending()
             time.sleep(1)
     except KeyboardInterrupt:
-        bot.logger.info("Stopped manually.")
+        bot.logger.info("Stopped manually (KeyboardInterrupt).")
     except Exception as e:
         bot.logger.error(f"Unexpected error: {e}")
 

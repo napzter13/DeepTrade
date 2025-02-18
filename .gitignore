@@ -8,3 +8,4 @@ training_data/
 
 models/*
 !models/advanced_lstm_model_architecture.png
+
