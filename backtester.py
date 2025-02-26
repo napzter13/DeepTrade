@@ -54,8 +54,8 @@ DO_USE_REAL_GPT = False
 DO_USE_MODEL_PRED = False
 
 # Adjust these for the time range:
-START_TIME = datetime.datetime(2024, 1, 1)
-END_TIME   = datetime.datetime(2025, 1, 1)
+START_TIME = datetime.datetime(2023, 1, 1)
+END_TIME   = datetime.datetime(2024, 1, 1)
 
 # If >1, we only reliably gather training_data. (Scenario logs may be duplicated.)
 CONCURRENT_THREADS = 1  # or 3, etc.

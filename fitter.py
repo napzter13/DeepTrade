@@ -26,6 +26,7 @@ import argparse
 import logging
 import numpy as np
 import tensorflow as tf
+from tensorflow.keras import mixed_precision
 from botlib.environment import (
     NUM_FUTURE_STEPS,
 )
@@ -37,6 +38,8 @@ from botlib.input_preprocessing import ModelScaler, prepare_for_model_inputs
 
 # RL DQN
 from botlib.rl import DQNAgent, ACTIONS
+
+mixed_precision.set_global_policy("mixed_float16")
 
 RL_TRANSITIONS_FILE = os.path.join("training_data", "rl_transitions.csv")
 
@@ -311,8 +314,16 @@ class Trainer:
         # Train
         early_stop = tf.keras.callbacks.EarlyStopping(
             monitor='val_loss', 
-            patience=20, 
+            patience=10, 
             restore_best_weights=True
+        )
+        
+        reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,        # reduce LR by half
+            patience=5,        # wait 5 epochs of no improvement
+            min_lr=1e-6,       # do not go below this LR
+            verbose=1
         )
 
         self.logger.info(f"Fitting LSTM => output dim={NUM_FUTURE_STEPS}, epochs={self.epochs}, batch={self.batch_size}")
@@ -331,7 +342,7 @@ class Trainer:
             ) if len(Y_val) > 0 else None,
             epochs=self.epochs,
             batch_size=self.batch_size,
-            callbacks=[early_stop],
+            callbacks=[early_stop, reduce_lr],
             verbose=1
         )
 

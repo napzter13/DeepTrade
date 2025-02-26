@@ -364,7 +364,8 @@ def build_multi_timeframe_model(
         weight_decay=1e-5,
         beta_1=0.9,
         beta_2=0.999,
-        epsilon=1e-7
+        epsilon=1e-7,
+        clipnorm=1.0
     )
 
     model.compile(optimizer=optimizer, loss='mse')
