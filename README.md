@@ -55,6 +55,8 @@ After the neural network model generates 10 predicted returns (`y_1..y_10`), an 
 2. **`fitter.py`**
    - Trains a **multi-output LSTM** from `training_data.csv`.
    - Optionally trains a **DQN** (offline) using `rl_transitions.csv`.
+   - Implements a rolling, time-ordered approach—no random shuffling—so data remains chronological.
+
 
 3. **`trader.py`**
    - Executes **live** trading using the LSTM model and optional GPT-based sentiment signals, every 20 minutes.
@@ -81,6 +83,7 @@ After the neural network model generates 10 predicted returns (`y_1..y_10`), an 
   - **`indicators.py`** — TA indicators (RSI, MACD, Bollinger, etc.).  
   - **`models.py`** — LSTM model construction and loading.  
   - **`rl.py`** — Single-step DQN agent logic (stores transitions, trains offline).  
+  - **`training_data_handler.py`** — Handles real-time data logging from `tradebot.py`. Collects neural network (LSTM) and reinforcement learning (RL) sample data, ensuring consistent formatting and time-aligned rolling-window samples for efficient retraining.
 
 - **`models/`** — Stores trained models, e.g. `advanced_lstm_model.keras`.  
 
@@ -162,7 +165,9 @@ After the neural network model generates 10 predicted returns (`y_1..y_10`), an 
 
    - LSTM: Trains the multi‐output LSTM that predicts 10 future returns.
    - RL: If rl_transitions.csv is present, trains an offline DQN that uses those transitions.
+   - Uses chronological splits (`train_ratio`, `val_ratio`) without shuffling, preserving time order.
    - Saves the LSTM model to models/advanced_lstm_model.keras (and DQN weights to rl_DQNAgent.weights.h5).
+
 
 3. **Live Trading:**
 
