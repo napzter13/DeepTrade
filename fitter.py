@@ -59,10 +59,10 @@ class Trainer:
         santiment_dim=12,
         ta_dim=63,
         signal_dim=11,
-        epochs=600,
+        epochs=500,
         batch_size=32,
         apply_scaling=True,
-        train_ratio=0.7,
+        train_ratio=0.8,
         val_ratio=0.2,
         skip_lstm=False
     ):
@@ -139,6 +139,7 @@ class Trainer:
         all_ta   = []
         all_ctx  = []
         all_Y    = []
+        all_ts   = []
 
         with open(self.training_csv, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -154,6 +155,7 @@ class Trainer:
 
             for row in reader:
                 try:
+                    timestamp_str = row["timestamp"]
                     arr_5m_str  = row["arr_5m"]
                     arr_15m_str = row["arr_15m"]
                     arr_1h_str  = row["arr_1h"]
@@ -195,6 +197,7 @@ class Trainer:
                     all_ta.append(arr_ta_list)
                     all_ctx.append(arr_ctx_list)
                     all_Y.append(y_vec)
+                    all_ts.append(timestamp_str)
 
                 except Exception as e:
                     self.logger.warning(f"Skipping row parse error: {e}")
@@ -215,7 +218,7 @@ class Trainer:
         if len(all_5m) < 1:
             return [None]*9
 
-        return X_5m, X_15m, X_1h, X_gt, X_sa, X_ta, X_ctx, Y, None
+        return X_5m, X_15m, X_1h, X_gt, X_sa, X_ta, X_ctx, Y, all_ts
 
     def split_data(self, N):
         """
@@ -237,16 +240,16 @@ class Trainer:
         (X_5m, X_15m, X_1h,
          X_gt, X_sa,
          X_ta, X_ctx,
-         Y, _) = data
+         Y, all_ts) = data
 
         N = len(Y)
         if N < 10:
             self.logger.error("Too few samples => abort LSTM training.")
             return
 
-        # Shuffle
         idx = np.arange(N)
-        np.random.shuffle(idx)
+        # np.random.shuffle(idx)    # intentionally NOT shuffling (time-based)
+
         X_5m  = X_5m[idx]
         X_15m = X_15m[idx]
         X_1h  = X_1h[idx]
@@ -254,22 +257,30 @@ class Trainer:
         X_sa  = X_sa[idx]
         X_ta  = X_ta[idx]
         X_ctx = X_ctx[idx]
-        Y     = Y[idx]  # shape(N,10)
+        Y     = Y[idx]
+        all_ts = np.array(all_ts)[idx]
 
         # Split
         train_end, val_end = self.split_data(N)
-        X_5m_train, X_5m_val, X_5m_test   = X_5m[:train_end], X_5m[train_end:val_end], X_5m[val_end:]
-        X_15m_train,X_15m_val,X_15m_test  = X_15m[:train_end],X_15m[train_end:val_end],X_15m[val_end:]
-        X_1h_train, X_1h_val, X_1h_test   = X_1h[:train_end], X_1h[train_end:val_end], X_1h[val_end:]
-        X_gt_train, X_gt_val, X_gt_test   = X_gt[:train_end], X_gt[train_end:val_end], X_gt[val_end:]
-        X_sa_train, X_sa_val, X_sa_test   = X_sa[:train_end], X_sa[train_end:val_end], X_sa[val_end:]
-        X_ta_train, X_ta_val, X_ta_test   = X_ta[:train_end], X_ta[train_end:val_end], X_ta[val_end:]
-        X_ctx_train,X_ctx_val,X_ctx_test  = X_ctx[:train_end],X_ctx[train_end:val_end],X_ctx[val_end:]
-        Y_train,     Y_val,     Y_test    = Y[:train_end],    Y[train_end:val_end],    Y[val_end:]
+        X_5m_train, X_5m_val   = X_5m[:train_end], X_5m[train_end:val_end]
+        X_15m_train,X_15m_val  = X_15m[:train_end],X_15m[train_end:val_end]
+        X_1h_train, X_1h_val   = X_1h[:train_end], X_1h[train_end:val_end]
+        X_gt_train, X_gt_val   = X_gt[:train_end], X_gt[train_end:val_end]
+        X_sa_train, X_sa_val   = X_sa[:train_end], X_sa[train_end:val_end]
+        X_ta_train, X_ta_val   = X_ta[:train_end], X_ta[train_end:val_end]
+        X_ctx_train,X_ctx_val  = X_ctx[:train_end],X_ctx[train_end:val_end]
+        Y_train,     Y_val     = Y[:train_end],    Y[train_end:val_end]
+        ts_train = all_ts[:train_end]
 
         self.logger.info(
-            f"Train={len(Y_train)}, Val={len(Y_val)}, Test={len(Y_test)}"
+            f"Train={len(Y_train)}, Val={len(Y_val)}"
         )
+
+        # DEBUG: row_train_start, row_train_end. Remove all_ts after confirming order.
+        if len(ts_train) > 0:
+            row_train_start = ts_train[0]
+            row_train_end   = ts_train[-1]
+            self.logger.info(f"Train slice => start={row_train_start}, end={row_train_end}")
 
         # load/fallback scalers
         try:
@@ -303,13 +314,6 @@ class Trainer:
             X_gt_val, X_sa_val, X_ta_val, X_ctx_val,
             model_scaler
         )
-        (X_5m_test, X_15m_test, X_1h_test,
-         X_gt_test, X_sa_test,
-         X_ta_test, X_ctx_test) = prepare_for_model_inputs(
-            X_5m_test, X_15m_test, X_1h_test,
-            X_gt_test, X_sa_test, X_ta_test, X_ctx_test,
-            model_scaler
-        )
 
         # Train
         early_stop = tf.keras.callbacks.EarlyStopping(
@@ -327,6 +331,8 @@ class Trainer:
         )
 
         self.logger.info(f"Fitting LSTM => output dim={NUM_FUTURE_STEPS}, epochs={self.epochs}, batch={self.batch_size}")
+        self.logger.info(f"Chronological split => train={len(Y_train)}, val={len(Y_val)}")
+
         self.model.fit(
             x=[
                 X_5m_train, X_15m_train, X_1h_train,
@@ -343,22 +349,9 @@ class Trainer:
             epochs=self.epochs,
             batch_size=self.batch_size,
             callbacks=[early_stop, reduce_lr],
-            verbose=1
+            verbose=1,
+            shuffle=False
         )
-
-        # Evaluate
-        if len(Y_test)>0:
-            loss = self.model.evaluate(
-                [
-                    X_5m_test, X_15m_test, X_1h_test,
-                    X_gt_test, X_sa_test, X_ta_test, X_ctx_test
-                ],
-                Y_test,
-                verbose=0
-            )
-            self.logger.info(f"Test Loss => {loss:.6f}")
-        else:
-            self.logger.info("No test set => skipping final evaluation.")
 
         # Save
         try:
@@ -483,7 +476,7 @@ def parse_args():
                         help="Path to multi-output training_data.csv.")
     parser.add_argument("--model_out", type=str, default="models/advanced_lstm_model.keras",
                         help="File path for the LSTM model.")
-    parser.add_argument("--epochs", type=int, default=600, help="LSTM epochs.")
+    parser.add_argument("--epochs", type=int, default=500, help="LSTM epochs.")
     parser.add_argument("--batch_size", type=int, default=32, help="LSTM batch size.")
     parser.add_argument("--no_scale", action="store_true",
                         help="Disable feature scaling.")

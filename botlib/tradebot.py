@@ -61,8 +61,8 @@ from .models import (
     get_local_model_assessment as m_get_local_model_assessment,
     load_advanced_lstm_model
 )
-from botlib.input_preprocessing import ModelScaler, prepare_for_model_inputs
-
+from .input_preprocessing import ModelScaler, prepare_for_model_inputs
+from .training_data_handler import TrainingDataHandler
 
 class TradingBot:
     def __init__(self):
@@ -153,6 +153,13 @@ class TradingBot:
             santiment_dim=self.santiment_dim,
             ta_dim=self.context_ta_dim,
             signal_dim=self.context_sig_dim
+        )
+        
+        self.training_data_handler = TrainingDataHandler(
+            lstm_data_file="training_data/lstm_samples.csv",
+            rl_data_file="training_data/rl_transitions.csv",
+            max_days=35,                     # 28d train + 7d val => 35 total
+            daily_training_time="16:00"      # run training job each day at 16:00 UTC
         )
         
         # Clean up old .lock / .tmp from input_cache
@@ -1053,8 +1060,42 @@ class TradingBot:
                 "action": action,
                 "balances": new_balances,
                 "total_equity": float(new_equity),
+                "atr_percent": float(atr_val),
                 "reward": float(reward)
             }
+            
+            sample_dict = {
+                "timestamp": self.last_log_data["timestamp"],
+                "arr_5m": self.last_log_data["arr_5m"],  # shape = (1,241,9)
+                "price": self.last_log_data["current_price"],
+                "arr_15m": self.last_log_data["arr_15m"], 
+                "arr_1h": self.last_log_data["arr_1h"], 
+                "arr_google_trend": self.last_log_data["arr_google_trend"],
+                "arr_santiment": self.last_log_data["arr_santiment"],
+                "arr_ta_63": self.last_log_data["arr_ta_63"],
+                "arr_ctx_11": self.last_log_data["arr_ctx_11"]
+            }
+            self.training_data_handler.add_lstm_sample(sample_dict)
+            
+            transition_dict = {
+                "timestamp": self.last_log_data["timestamp"],
+                "old_state": self.build_rl_state(
+                    self.last_log_data["final_signal"],   # shape=(10,) in [-100,100]
+                    self.last_log_data["atr_percent"],
+                    self.last_log_data["balances"],
+                    self.last_log_data["current_price"]
+                ).tolist(),
+                "action": self.last_log_data["action"],   # "LONG", "SHORT", or "HOLD"
+                "reward": self.last_log_data["reward"],   # single-step reward
+                "new_state": self.build_rl_state(
+                    self.last_log_data["final_signal"],
+                    self.last_log_data["atr_percent"],
+                    self.last_log_data["balances"],
+                    self.last_log_data["current_price"]
+                ).tolist(),
+                "done": False
+            }
+            self.training_data_handler.add_rl_transition(transition_dict)
 
         except Exception as e:
             self.logger.error(f"Trading cycle error: {e}")
