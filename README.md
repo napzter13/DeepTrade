@@ -65,8 +65,9 @@ After the neural network model generates 10 predicted returns (`y_1..y_10`), an 
 4. **`merge_training_data.py`**
    - Merges multiple `training_data.csv` files (from different backtests) into one for more comprehensive training.
 
-5. **`fix_tf_gpu.py`**
-   - Utility script for resolving TensorFlow GPU issues on Windows.
+5. **`feature_selection.py`**
+   - Employs Correlation Analysis, PCA, RFE, and SHAP to measure feature importance.
+   - Outputs plots and rankings in a specified folder for easy inspection and pruning of unnecessary features.
 
 ---
 
