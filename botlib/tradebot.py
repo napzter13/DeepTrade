@@ -170,6 +170,13 @@ class TradingBot:
                 except Exception as e:
                     print(f"Error deleting {file}: {e}")
 
+        #######################################################################
+        # RL N-STEP (3-step) REWARDS
+        #######################################################################
+        self.nstep_buffer = []  # store recent single-step transitions
+        self.nstep_size = 3
+        self.nstep_weights = [2.0, 1.5, 1.0] 
+
     def _initialize_trade_log(self):
         """
         Creates txs.csv with headers if it does not exist.
@@ -958,6 +965,7 @@ class TradingBot:
           - RL action => {LONG, SHORT, HOLD}
           - trade, measure reward from single-step equity change
           - store transition, train
+          - also store a 3-step transition with custom weighting.
         """
         self.logger.info("=== Starting Trading Cycle ===")
         try:
@@ -1015,6 +1023,9 @@ class TradingBot:
             )
 
             # 4) RL action
+            if threading.current_thread() is threading.main_thread():
+                self.rl_agent.load()
+                
             atr_val = 0.0
             if klines_15m and len(klines_15m) == 241:
                 atr_v = compute_atr_from_klines(klines_15m, 14)
@@ -1025,7 +1036,7 @@ class TradingBot:
             )
 
             if action != "HOLD":
-                reward -= 0.0001  # Add penalty so trader doesn't flip-flop.
+                reward -= 0.0001  # small penalty to discourage constant flip-flops
 
             # 5) Execute
             self.process_trade_signal(action, float(signals_10[0]), current_price, atr_val)
@@ -1035,6 +1046,8 @@ class TradingBot:
             next_state = self.build_rl_state(signals_10, atr_val, new_balances, current_price)
 
             done = False  # no terminal condition
+
+            # Store single-step transition
             self.rl_agent.store_transition(
                 state = self.build_rl_state(signals_10, atr_val, balances, current_price),
                 action= action,
@@ -1047,6 +1060,49 @@ class TradingBot:
                 self.rl_agent.save()
 
             self.save_gpt_cache()
+
+            # =========================
+            # ADD N-STEP (3-step) LOGIC
+            # =========================
+            # 1) Append this single-step transition to our local nstep_buffer
+            trans = (
+                self.build_rl_state(signals_10, atr_val, balances, current_price),
+                action,
+                reward,
+                next_state,
+                done
+            )
+            self.nstep_buffer.append(trans)
+
+            # 2) If we now have at least 3 transitions, combine them
+            if len(self.nstep_buffer) >= self.nstep_size:
+                # Weighted sum of 3 rewards: [2.0, 1.5, 1.0]
+                multi_reward = 0.0
+                for i in range(self.nstep_size):
+                    multi_reward += self.nstep_weights[i] * self.nstep_buffer[i][2]
+
+                old_state  = self.nstep_buffer[0][0]  # state from the earliest transition
+                old_action = self.nstep_buffer[0][1]  # action from earliest step
+                # next_state from the last transition in the buffer
+                final_next_state = self.nstep_buffer[self.nstep_size - 1][3]
+                # if any done in the chain, it's effectively done
+                final_done = any(self.nstep_buffer[i][4] for i in range(self.nstep_size))
+
+                # store the multi-step transition
+                self.rl_agent.store_transition(
+                    state     = old_state,
+                    action    = old_action,
+                    reward    = multi_reward,
+                    next_state= final_next_state,
+                    done      = final_done
+                )
+
+                # training step again
+                self.rl_agent.train_step()
+
+                # pop the oldest transition so the buffer moves forward by 1
+                self.nstep_buffer.pop(0)
+            # ================
 
             # 6) Log
             self.last_log_data = {

@@ -83,6 +83,8 @@ class DQNAgent:
             self.logger.info("Loaded DQNAgent weights from " + RL_MODEL_PATH)
         except FileNotFoundError:
             self.logger.warning(RL_MODEL_PATH + " not found.")
+        except OSError:
+            self.logger.warning(RL_MODEL_PATH + " not found.")
 
     def _build_network(self, lr):
         """

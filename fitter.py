@@ -59,7 +59,7 @@ class Trainer:
         santiment_dim=12,
         ta_dim=63,
         signal_dim=11,
-        epochs=500,
+        epochs=1000,
         batch_size=32,
         apply_scaling=True,
         train_ratio=0.8,
@@ -476,7 +476,7 @@ def parse_args():
                         help="Path to multi-output training_data.csv.")
     parser.add_argument("--model_out", type=str, default="models/advanced_lstm_model.keras",
                         help="File path for the LSTM model.")
-    parser.add_argument("--epochs", type=int, default=500, help="LSTM epochs.")
+    parser.add_argument("--epochs", type=int, default=1000, help="LSTM epochs.")
     parser.add_argument("--batch_size", type=int, default=32, help="LSTM batch size.")
     parser.add_argument("--no_scale", action="store_true",
                         help="Disable feature scaling.")
