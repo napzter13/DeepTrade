@@ -309,8 +309,6 @@ class TradingBot:
         prompt_lines.append("Predict BTC price action for the next hours. Provide a single integer between -100 and 100.")
         prompt_lines.append("")
         prompt_lines.append(f"Analyzing pair: {self.symbol}")
-        # prompt_lines.append(f"Current BTC balance: {balances['BTC']}")
-        # prompt_lines.append(f"Current EUR balance: {balances['EUR']}")
         prompt_lines.append(f"UTC Timestamp: {current_utc_time}")
         prompt_lines.append(f"Current Price: {current_price:.2f}")
         ratio = ob_data.get("bid_ask_volume_ratio", 0.5)
@@ -691,7 +689,13 @@ class TradingBot:
         if self.last_equity is None:
             self.last_equity = current_equity
             return 0.0
-        reward = (current_equity - self.last_equity) / max(self.last_equity, 1e-9)
+
+        # OLD fractional approach:
+        # reward = (current_equity - self.last_equity) / max(self.last_equity, 1e-9)
+
+        # NEW: log return
+        reward = np.log(current_equity / max(self.last_equity, 1e-9))
+
         self.last_equity = current_equity
         return reward
 
@@ -1011,14 +1015,17 @@ class TradingBot:
             )
 
             # 4) RL action
-            
             atr_val = 0.0
             if klines_15m and len(klines_15m) == 241:
                 atr_v = compute_atr_from_klines(klines_15m, 14)
                 atr_val = atr_v/current_price if atr_v else 0.0
+
             action = self.rl_agent.select_action(
                 self.build_rl_state(signals_10, atr_val, balances, current_price)
             )
+
+            if action != "HOLD":
+                reward -= 0.0001  # Add penalty so trader doesn't flip-flop.
 
             # 5) Execute
             self.process_trade_signal(action, float(signals_10[0]), current_price, atr_val)
