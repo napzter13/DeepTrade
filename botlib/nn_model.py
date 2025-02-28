@@ -17,7 +17,7 @@ def weighted_mse_loss(y_true, y_pred):
 
     Adjust these to suit preference (e.g. exponential decay).
     """
-    # Define any weighting scheme you like
+    # Define any weighting scheme we like
     weights = tf.constant([2.0, 1.8, 1.5, 1.3, 1.1, 1.0, 1.0, 1.0, 1.0, 1.0],
                           dtype=tf.float32)
     # Reshape to broadcast along batch dimension
@@ -442,7 +442,7 @@ def build_multi_timeframe_model(
 
     out = layers.Dense(
         NUM_FUTURE_STEPS,
-        activation='tanh',  # or 'linear' if you prefer
+        activation='tanh',  # or 'linear' if we prefer
         kernel_regularizer=regularizers.l2(l2_reg),
         name="output"
     )(x2)
