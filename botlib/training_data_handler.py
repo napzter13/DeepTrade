@@ -145,7 +145,7 @@ class TrainingDataHandler:
             # or use:
             # os.system("python fitter.py --csv training_data/lstm_samples.csv --rl_csv training_data/rl_transitions.csv")
             # For example:
-            os.system("python fitter.py --csv training_data/lstm_samples.csv --rl_csv training_data/rl_transitions.csv --no_scale")
+            os.system("python fitter.py --csv training_data/lstm_samples.csv --rl_csv training_data/rl_transitions.csv --no_scale --early_stop_patience 5")
             self.logger.info("[TrainingDataHandler] => daily training job DONE.")
         except Exception as e:
             self.logger.error(f"Error during daily training job: {e}")

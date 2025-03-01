@@ -60,6 +60,7 @@ class Trainer:
         ta_dim=63,
         signal_dim=11,
         epochs=1000,
+        early_stop_patience=10,
         batch_size=32,
         apply_scaling=True,
         train_ratio=0.8,
@@ -94,6 +95,7 @@ class Trainer:
         self.ta_dim = ta_dim
         self.signal_dim = signal_dim
         self.epochs = epochs
+        self.early_stop_patience = early_stop_patience
         self.batch_size = batch_size
         self.apply_scaling= apply_scaling
         self.train_ratio = train_ratio
@@ -318,7 +320,7 @@ class Trainer:
         # Train
         early_stop = tf.keras.callbacks.EarlyStopping(
             monitor='val_loss', 
-            patience=10, 
+            patience=early_stop_patience, 
             restore_best_weights=True
         )
         
@@ -477,6 +479,7 @@ def parse_args():
     parser.add_argument("--model_out", type=str, default="models/advanced_lstm_model.keras",
                         help="File path for the LSTM model.")
     parser.add_argument("--epochs", type=int, default=1000, help="LSTM epochs.")
+    parser.add_argument("--early_stop_patience", type=int, default=10, help="early_stop_patience")
     parser.add_argument("--batch_size", type=int, default=32, help="LSTM batch size.")
     parser.add_argument("--no_scale", action="store_true",
                         help="Disable feature scaling.")
@@ -507,6 +510,7 @@ def main():
         model_out=args.model_out,
         epochs=args.epochs,
         batch_size=args.batch_size,
+        early_stop_patience=args.early_stop_patience,
         apply_scaling=not args.no_scale,
         skip_lstm=args.skip_lstm
     )
