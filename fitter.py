@@ -490,7 +490,7 @@ def parse_args():
                         help="File path for the LSTM model.")
     parser.add_argument("--epochs", type=int, default=1000, help="LSTM epochs.")
     parser.add_argument("--early_stop_patience", type=int, default=10, help="early_stop_patience")
-    parser.add_argument("--batch_size", type=int, default=32, help="LSTM batch size.")
+    parser.add_argument("--batch_size", type=int, default=16, help="LSTM batch size.")
     parser.add_argument("--no_scale", action="store_true",
                         help="Disable feature scaling.")
     parser.add_argument("--skip_lstm", action="store_true",

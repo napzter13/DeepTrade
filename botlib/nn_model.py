@@ -354,7 +354,7 @@ def build_multi_timeframe_model(
 
     out = layers.Dense(
         NUM_FUTURE_STEPS,
-        activation='tanh',      # or 'sigmoid' or None
+        activation='tanh',
         name="output"
     )(x2)
 
@@ -372,15 +372,13 @@ def build_multi_timeframe_model(
         name="mega_multi_timeframe_model"
     )
 
-    # Use AdamW (need "pip install tensorflow-addons")
-    # Feel free to adjust learning_rate, weight_decay, etc.
     optimizer = tfa.optimizers.AdamW(
-        learning_rate=0.00005,    # 0.0001
+        learning_rate=1e-4,
         weight_decay=1e-5,
         beta_1=0.9,
         beta_2=0.999,
         epsilon=1e-7
     )
 
-    model.compile(optimizer=optimizer, loss='mse')
+    model.compile(optimizer=optimizer, loss=weighted_mse_loss)
     return model

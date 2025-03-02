@@ -159,7 +159,7 @@ def load_advanced_lstm_model(model_5m_window=241, model_15m_window=241, model_1h
         try:
             loaded = tf.keras.models.load_model(
                 ADVANCED_MODEL_PATH,
-                # custom_objects={"weighted_mse_loss": weighted_mse_loss}
+                custom_objects={"weighted_mse_loss": weighted_mse_loss}
             )
             logger.info("Loaded advanced multi-input LSTM model from disk.")
             return loaded

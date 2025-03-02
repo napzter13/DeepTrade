@@ -13,3 +13,6 @@ pytrends
 graphviz
 pydot
 tensorflow-addons
+shap
+matplotlib
+seaborn
