@@ -311,10 +311,13 @@ class ModelScaler:
         for i in range(D):
             col_i = X_santiment[:, i:i+1]  # shape (N,1)
 
-            # Compute mean ignoring NaNs
-            mean_val = np.nanmean(col_i, axis=0)  # shape (1,)
-            # If entire column was NaN => fallback to 0.0
-            mean_val = np.where(np.isnan(mean_val), 0.0, mean_val)
+            # Check if col_i is empty or all-NaN first
+            if col_i.size == 0 or np.all(np.isnan(col_i)):
+                # Fallback to 0.0
+                mean_val = np.array([0.0], dtype=col_i.dtype)
+            else:
+                # Safely compute the mean
+                mean_val = np.nanmean(col_i, axis=0)  # shape (1,)
 
             # Impute
             col_imputed = np.where(np.isnan(col_i), mean_val, col_i)

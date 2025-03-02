@@ -61,11 +61,12 @@ class Trainer:
         signal_dim=11,
         epochs=1000,
         early_stop_patience=10,
-        batch_size=32,
+        batch_size=64,
         apply_scaling=True,
         train_ratio=0.8,
         val_ratio=0.2,
-        skip_lstm=False
+        skip_lstm=False,
+        max_rows=0
     ):
         """
         :param training_csv:  Path to training_data.csv from the backtester
@@ -101,6 +102,7 @@ class Trainer:
         self.train_ratio = train_ratio
         self.val_ratio   = val_ratio
         self.skip_lstm   = skip_lstm
+        self.max_rows   = max_rows
 
         if not skip_lstm:
             self.logger.info(f"Initializing multi-timeframe LSTM model with {NUM_FUTURE_STEPS} outputs.")
@@ -114,7 +116,7 @@ class Trainer:
                 signal_dim=self.signal_dim
             )
             # compile with MSE for multi-output regression
-            self.model.compile(optimizer='adam', loss='mse')
+            # self.model.compile(optimizer='adam', loss='mse')
         else:
             self.logger.info("Skipping LSTM model initialization (skip_lstm=True).")
             self.model = None
@@ -142,7 +144,7 @@ class Trainer:
         all_ctx  = []
         all_Y    = []
         all_ts   = []
-
+        
         with open(self.training_csv, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             missing_cols = []
@@ -154,8 +156,12 @@ class Trainer:
             if missing_cols:
                 self.logger.error(f"CSV missing columns: {missing_cols}")
                 return [None]*9
-
+            
+            a = 0
             for row in reader:
+                if self.max_rows > 0 and a >= self.max_rows:
+                    break
+
                 try:
                     timestamp_str = row["timestamp"]
                     arr_5m_str  = row["arr_5m"]
@@ -175,13 +181,15 @@ class Trainer:
                     arr_ta_list   = json.loads(arr_ta_str)[0]
                     arr_ctx_list  = json.loads(arr_ctx_str)[0]
 
-                    if len(arr_5m_list)!=241: continue
+                    if len(arr_5m_list)!=241:  continue
                     if len(arr_15m_list)!=241: continue
                     if len(arr_1h_list)!=241:  continue
                     if len(arr_gt_list)!=24:   continue
                     if len(arr_sa_list)!=12:   continue
                     if len(arr_ta_list)!=63:   continue
                     if len(arr_ctx_list)!=11:  continue
+                    
+                    if sum(arr_5m_list[0]) == 0:  continue
 
                     # parse all y_i
                     y_vec = []
@@ -200,6 +208,8 @@ class Trainer:
                     all_ctx.append(arr_ctx_list)
                     all_Y.append(y_vec)
                     all_ts.append(timestamp_str)
+                    
+                    a += 1
 
                 except Exception as e:
                     self.logger.warning(f"Skipping row parse error: {e}")
@@ -248,7 +258,7 @@ class Trainer:
         if N < 10:
             self.logger.error("Too few samples => abort LSTM training.")
             return
-
+        
         idx = np.arange(N)
         # np.random.shuffle(idx)    # intentionally NOT shuffling (time-based)
 
@@ -320,14 +330,14 @@ class Trainer:
         # Train
         early_stop = tf.keras.callbacks.EarlyStopping(
             monitor='val_loss', 
-            patience=early_stop_patience, 
+            patience=self.early_stop_patience, 
             restore_best_weights=True
         )
         
         reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
             monitor='val_loss',
             factor=0.5,        # reduce LR by half
-            patience=5,        # wait 5 epochs of no improvement
+            patience=10,
             min_lr=1e-6,       # do not go below this LR
             verbose=1
         )
@@ -448,13 +458,13 @@ class Trainer:
         except Exception as e:
             self.logger.error(f"Error saving RL => {e}")
 
-    def run(self, rl_csv=None, rl_out=None, rl_epochs=5, rl_batches=500, skip_lstm=False):
+    def run(self, rl_csv=None, rl_out=None, rl_epochs=5, rl_batches=500):
         """
         Main entry point:
          1) LSTM multi-output training if skip_lstm=False
          2) RL offline training if rl_csv is provided
         """
-        if not skip_lstm:
+        if not self.skip_lstm:
             self.train_lstm()
         else:
             self.logger.info("Skipping LSTM training.")
@@ -485,6 +495,8 @@ def parse_args():
                         help="Disable feature scaling.")
     parser.add_argument("--skip_lstm", action="store_true",
                         help="Skip LSTM training entirely.")
+    parser.add_argument("--max_rows", type=int, default=0, 
+                        help="Load x rows from csv file. 0 is all.")
 
     # RL
     parser.add_argument("--rl_csv", type=str, default=RL_TRANSITIONS_FILE,
@@ -512,14 +524,14 @@ def main():
         batch_size=args.batch_size,
         early_stop_patience=args.early_stop_patience,
         apply_scaling=not args.no_scale,
-        skip_lstm=args.skip_lstm
+        skip_lstm=args.skip_lstm,
+        max_rows=args.max_rows
     )
     trainer.run(
         rl_csv=args.rl_csv,
         rl_out=args.rl_out,
         rl_epochs=args.rl_epochs,
-        rl_batches=args.rl_batches,
-        skip_lstm=args.skip_lstm
+        rl_batches=args.rl_batches
     )
 
 

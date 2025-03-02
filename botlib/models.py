@@ -18,7 +18,7 @@ from .environment import (
     OPENAI_API_KEY,
     get_logger
 )
-from .nn_model import build_multi_timeframe_model
+from .nn_model import build_multi_timeframe_model, weighted_mse_loss
 
 logger = get_logger("Models")
 
@@ -157,7 +157,10 @@ If you are unsure, provide your best estimate within the specified range."""
 def load_advanced_lstm_model(model_5m_window=241, model_15m_window=241, model_1h_window=241, feature_dim=9, santiment_dim=12, ta_dim=63, signal_dim=11):
     if os.path.exists(ADVANCED_MODEL_PATH):
         try:
-            loaded = tf.keras.models.load_model(ADVANCED_MODEL_PATH)
+            loaded = tf.keras.models.load_model(
+                ADVANCED_MODEL_PATH,
+                # custom_objects={"weighted_mse_loss": weighted_mse_loss}
+            )
             logger.info("Loaded advanced multi-input LSTM model from disk.")
             return loaded
         except Exception as e:
