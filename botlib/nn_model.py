@@ -12,14 +12,13 @@ from .environment import (
 def weighted_mse_loss(y_true, y_pred):
     """
     Weighted MSE giving higher importance to nearer-term horizons.
-    For NUM_FUTURE_STEPS=10, a simple static weighting:
-        [2.0, 1.8, 1.5, 1.3, 1.1, 1.0, 1.0, 1.0, 1.0, 1.0]
+    For NUM_FUTURE_STEPS=5, a simple static weighting.
     """
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
-    weights = tf.constant([2.0, 1.8, 1.5, 1.3, 1.1, 1.0, 1.0, 1.0, 1.0, 1.0],
+    weights = tf.constant([2.0, 1.7, 1.4, 1.2, 1.0],
                           dtype=tf.float32)
-    weights = tf.reshape(weights, (1, -1))  # shape(1,10)
+    weights = tf.reshape(weights, (1, -1))  # shape(1,5)
     err_sq = tf.square(y_true - y_pred)
     weighted_err_sq = err_sq * weights
     return tf.reduce_mean(weighted_err_sq, axis=-1)
@@ -325,25 +324,25 @@ def build_multi_timeframe_model(
         x_ta = layers.Dropout(dropout_rate)(x_ta)
     x_ta = layers.Dense(64, activation='relu', name="ta_dense2")(x_ta)
 
-    # === Merge time-series + santiment + TA ===
-    merged_lstm_ta = layers.concatenate(
-        [x_5m, x_15m, x_1h, x_google, x_santiment, x_ta],
-        name="concat_lstm_ta"
+    # === final signal input (11-dim) ===
+    input_signal = layers.Input(shape=(signal_dim,), name="input_signal")
+    x_sig = layers.Dense(128, activation='relu', name="signal_dense1")(input_signal)
+    x_sig = layers.Dense(64, activation='relu', name="signal_dense2")(x_sig)
+    
+    # === Merge ALL ===
+    merged_all = layers.concatenate(
+        [x_5m, x_15m, x_1h, x_google, x_santiment, x_ta, x_sig],
+        name="concat_all"
     )
 
     # A deeper aggregator with bigger hidden layers
-    x = layers.Dense(1024, activation='relu', name="merged_dense1")(merged_lstm_ta)
+    x = layers.Dense(1024, activation='relu', name="merged_dense1")(merged_all)
     if dropout_rate > 1e-7:
         x = layers.Dropout(dropout_rate)(x)
     x = layers.Dense(512, activation='relu', name="merged_dense2")(x)
     if dropout_rate > 1e-7:
         x = layers.Dropout(dropout_rate)(x)
     x = layers.Dense(256, activation='relu', name="merged_dense3")(x)
-
-    # === final signal input (11-dim) ===
-    input_signal = layers.Input(shape=(signal_dim,), name="input_signal")
-    x_sig = layers.Dense(128, activation='relu', name="signal_dense1")(input_signal)
-    x_sig = layers.Dense(64, activation='relu', name="signal_dense2")(x_sig)
 
     # === Merge aggregator with signals
     x_merged_signal = layers.concatenate([x, x_sig], name="concat_signal_branch")
@@ -373,7 +372,7 @@ def build_multi_timeframe_model(
     )
 
     optimizer = tfa.optimizers.AdamW(
-        learning_rate=1e-4,
+        learning_rate=0.001,         # Before: 0.0001
         weight_decay=1e-5,
         beta_1=0.9,
         beta_2=0.999,

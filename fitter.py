@@ -331,14 +331,15 @@ class Trainer:
         early_stop = tf.keras.callbacks.EarlyStopping(
             monitor='val_loss', 
             patience=self.early_stop_patience, 
-            restore_best_weights=True
+            restore_best_weights=True,
+            verbose=1
         )
         
         reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
             monitor='val_loss',
-            factor=0.5,        # reduce LR by half
+            factor=2/3,         # Reduce LR by 33%, new LR is 2/3 of the previous LR
             patience=10,
-            min_lr=1e-6,       # do not go below this LR
+            min_lr=1e-7,
             verbose=1
         )
 
@@ -537,3 +538,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+# Before   learning_rate=0.0005:     loss: 0.2082 - val_loss: 0.2415
+# Before   learning_rate=0.001:      loss: 0.2082 - val_loss: 0.2415
+
+
+# python fitter.py --early_stop_patience 50 --batch_size 32

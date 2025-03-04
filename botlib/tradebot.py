@@ -97,7 +97,7 @@ class TradingBot:
         self.symbol = "BTCEUR"
 
         # Basic params
-        self.max_trade_fraction = 0.1
+        self.max_trade_fraction = 0.2
         self.min_trade_eur_trade = 10.0
         self.timeframes = [
             Client.KLINE_INTERVAL_5MINUTE,
@@ -106,7 +106,6 @@ class TradingBot:
             Client.KLINE_INTERVAL_4HOUR,
             Client.KLINE_INTERVAL_1DAY
         ]
-        self.lookback_days = 7
 
         # CSV logging
         self.trade_log_file = "output/txs.csv"
@@ -128,6 +127,7 @@ class TradingBot:
 
         # DQN Agent => now the state_dim = 10 (multi-output) + 2 (ATR, BTC%, EUR%) = 13
         self.rl_state_dim = NUM_FUTURE_STEPS + 3
+        self.do_rl_train_step = True
         self.rl_agent = DQNAgent(
             state_dim=self.rl_state_dim
         )
@@ -257,7 +257,7 @@ class TradingBot:
         arr_ta, arr_ctx
     ):
         """
-        The advanced_model has 10 outputs => shape (1,10).
+        The advanced_model has 10 outputs => shape (1,5).
         We'll produce a vector of length 10 in [-100, 100].
         """
         s_5m, s_15m, s_1h, s_gt, s_sa, s_ta, s_ctx = prepare_for_model_inputs(
@@ -270,8 +270,8 @@ class TradingBot:
             raw_pred = self.advanced_model.predict(
                 [s_5m, s_15m, s_1h, s_gt, s_sa, s_ta, s_ctx],
                 verbose=0
-            )  # shape => (1,10)
-            signals_10 = raw_pred[0] * 100.0  # shape(10,)
+            )  # shape => (1,5)
+            signals_10 = raw_pred[0] * 100.0  # shape(5,)
             # clip to [-100,100]
             signals_10 = np.clip(signals_10, -100.0, 100.0)
             return signals_10
@@ -299,7 +299,7 @@ class TradingBot:
         use_model_pred = True
     ):
         """
-        We'll produce an array of shape(10,) from the advanced LSTM model (multi-output).
+        We'll produce an array of shape(5,) from the advanced LSTM model (multi-output).
         We'll still produce local GPT signals, news sentiment, etc.
 
         Return:
@@ -522,7 +522,7 @@ class TradingBot:
                 arr_ta_63, # shape=(1,63)
                 arr_ctx_11 # shape=(1,11)
             )
-            self.logger.info(f"[Aggregator] Model preds => {final_preds:.2f}")
+            self.logger.info(f"[Aggregator] Model preds => {str(final_preds)}")
         else:
             final_preds = np.zeros((10,), dtype=np.float32)
 
@@ -1055,7 +1055,8 @@ class TradingBot:
                 next_state= next_state,
                 done= done
             )
-            self.rl_agent.train_step()
+            if self.do_rl_train_step:
+                self.rl_agent.train_step()
             if threading.current_thread() is threading.main_thread():
                 self.rl_agent.save()
 
@@ -1098,7 +1099,8 @@ class TradingBot:
                 )
 
                 # training step again
-                self.rl_agent.train_step()
+                if self.do_rl_train_step:
+                    self.rl_agent.train_step()
 
                 # pop the oldest transition so the buffer moves forward by 1
                 self.nstep_buffer.pop(0)

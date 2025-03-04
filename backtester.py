@@ -47,14 +47,15 @@ from botlib.environment import (
 ###############################################################################
 # CONFIG
 ###############################################################################
-MAKE_NN_TRAINING_DATA = True
-MAKE_RL_TRAINING_DATA = False       # Only True when NN model is trained already.
+MAKE_NN_TRAINING_DATA = False
+MAKE_RL_TRAINING_DATA = True       # Only True when NN model is trained already.
 BLOCK_SANTIMENT_FETCHING = True
 DO_USE_REAL_GPT = False
-DO_USE_MODEL_PRED = False
+DO_USE_MODEL_PRED = True            # Set to True for Backtesting.
+DO_RL_TRAIN_STEP = False
 
 # Adjust these for the time range:
-START_TIME = datetime.datetime(2024, 5, 3)
+START_TIME = datetime.datetime(2024, 9, 1, 1)
 END_TIME   = datetime.datetime(2025, 1, 1)
 
 # If >1, we only reliably gather training_data. (Scenario logs may be duplicated.)
@@ -104,6 +105,7 @@ class HistoricalTradingBot(TradingBot):
         self.logger = get_logger("HistoricalTradingBot")
 
         # Track the previous iteration's RL state & action
+        self.do_rl_train_step = DO_RL_TRAIN_STEP
         self.prev_rl_state_vec = None
         self.prev_action = None
 
