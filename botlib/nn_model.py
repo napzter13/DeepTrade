@@ -157,7 +157,7 @@ def time_series_encoder(
     # Stack fewer LSTM blocks (reduced complexity)
     for i in range(n_lstm_blocks):
         # Less aggressive scaling of units
-        block_units = base_units * (min(i+1, 2))  # More conservative unit scaling
+        block_units = int(base_units * (min(i+1, 2)))  # Ensure integer values
         x = residual_block(
             x,
             units=block_units,
@@ -224,7 +224,7 @@ def build_multi_timeframe_model(
     input_5m = layers.Input(shape=(window_5m, feature_5m), name="input_5m")
     x_5m = time_series_encoder(
         input_5m,
-        base_units=base_units * 1.5,  # More balanced scaling
+        base_units=int(base_units * 1.5),  # More balanced scaling (as integer)
         n_lstm_blocks=2,  # Reduced depth
         dropout_rate=dropout_rate,
         l2_reg=l2_reg,
@@ -235,7 +235,7 @@ def build_multi_timeframe_model(
     input_15m = layers.Input(shape=(window_15m, feature_15m), name="input_15m")
     x_15m = time_series_encoder(
         input_15m,
-        base_units=base_units * 1.5,
+        base_units=int(base_units * 1.5),
         n_lstm_blocks=2,
         dropout_rate=dropout_rate,
         l2_reg=l2_reg,
@@ -284,7 +284,7 @@ def build_multi_timeframe_model(
     input_ta = layers.Input(shape=(ta_dim,), name="input_ta")
     x_ta = layers.BatchNormalization(name="ta_bn")(input_ta)
     x_ta = layers.Dense(
-        base_units * 1.5,
+        int(base_units * 1.5),
         activation='relu',
         kernel_regularizer=regularizers.l2(l2_reg),
         name="ta_dense1"
@@ -325,7 +325,7 @@ def build_multi_timeframe_model(
     
     # First dense layer
     x = layers.Dense(
-        base_units * 4,
+        int(base_units * 4),
         activation='relu',
         kernel_regularizer=regularizers.l2(l2_reg),
         name="final_dense1"
@@ -334,9 +334,9 @@ def build_multi_timeframe_model(
     x = layers.Dropout(dropout_rate, name="final_dropout1")(x)
     
     # Second dense layer with skip connection
-    skip = layers.Dense(base_units * 2, name="skip_proj")(merged)
+    skip = layers.Dense(int(base_units * 2), name="skip_proj")(merged)
     x = layers.Dense(
-        base_units * 2,
+        int(base_units * 2),
         activation='relu',
         kernel_regularizer=regularizers.l2(l2_reg),
         name="final_dense2"
