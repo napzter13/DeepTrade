@@ -1,227 +1,196 @@
 import tensorflow as tf
-import tensorflow_addons as tfa
-from tensorflow.keras import layers
+from tensorflow.keras import layers, regularizers
 from .environment import (
     NUM_FUTURE_STEPS,
 )
 
 ################################################################################
-# 1) Residual LSTM block (with optional dropout)
+# 1) Better balanced loss function with proper normalization
 ################################################################################
 
 def weighted_mse_loss(y_true, y_pred):
     """
-    Weighted MSE giving higher importance to nearer-term horizons.
-    For NUM_FUTURE_STEPS=5, a simple static weighting.
+    Balanced MSE with proper normalization and handling of time-series prediction.
+    Better suited for financial data with values in [-1,1] range.
     """
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
-    weights = tf.constant([2.0, 1.7, 1.4, 1.2, 1.0],
-                          dtype=tf.float32)
-    weights = tf.reshape(weights, (1, -1))  # shape(1,5)
-    err_sq = tf.square(y_true - y_pred)
+    
+    # More balanced weights for future predictions (less aggressive decay)
+    weights = tf.linspace(1.5, 1.0, NUM_FUTURE_STEPS)
+    weights = tf.reshape(weights, (1, -1))  # shape(1, NUM_FUTURE_STEPS)
+    
+    # Calculate error with gentler gradient clipping
+    errors = y_true - y_pred
+    # Use less aggressive clipping to allow larger gradients through
+    clipped_errors = tf.clip_by_value(errors, -3.0, 3.0)
+    err_sq = tf.square(clipped_errors)
+    
+    # Apply weights
     weighted_err_sq = err_sq * weights
-    return tf.reduce_mean(weighted_err_sq, axis=-1)
+    
+    # Handle NaN values
+    mask = tf.math.logical_not(tf.math.is_nan(y_true))
+    mask = tf.cast(mask, tf.float32)
+    
+    # Apply mask
+    masked_weighted_err_sq = weighted_err_sq * mask
+    
+    # Calculate mean
+    num_valid = tf.reduce_sum(mask, axis=-1)
+    total_err = tf.reduce_sum(masked_weighted_err_sq, axis=-1)
+    
+    # Prevent division by zero
+    num_valid = tf.maximum(num_valid, 1.0)
+    
+    return total_err / num_valid
 
-def residual_lstm_block(
-    x,
-    units_lstm=512,
-    return_sequences=True,
+################################################################################
+# 2) Refactored residual block with better regularization
+################################################################################
+
+def residual_block(
+    x, 
+    units, 
     dropout_rate=0.0,
-    name_prefix="lstm_block"
+    l2_reg=0.0001,
+    use_lstm=True,
+    activation='selu',
+    name_prefix="res_block"
 ):
     """
-    A residual block that applies a single LSTM layer,
-    then merges back via skip connection.
+    Improved residual block with stronger regularization and better gradient stability.
     """
-    # LSTM
-    lstm_out = layers.LSTM(
-        units_lstm,
-        return_sequences=return_sequences,
-        name=f"{name_prefix}_lstm",
+    # Create shortcut connection
+    shortcut = x
+    
+    # Normalize inputs before processing (helps training stability)
+    x_norm = layers.LayerNormalization(
+        epsilon=1e-5,
+        name=f"{name_prefix}_input_norm"
     )(x)
-
-    # Optional dropout on the LSTM output
-    if dropout_rate > 1e-7:
-        lstm_out = layers.Dropout(dropout_rate, name=f"{name_prefix}_dropout")(lstm_out)
-
-    # Residual / skip connection (Dense projection if shape mismatch)
-    if x.shape[-1] != lstm_out.shape[-1]:
-        x = layers.Dense(
-            units_lstm,
-            name=f"{name_prefix}_skip_proj"
-        )(x)
-    out = layers.Add(name=f"{name_prefix}_skip_add")([x, lstm_out])
-
-    out = layers.LayerNormalization(name=f"{name_prefix}_layernorm")(out)
-    return out
-
-################################################################################
-# 2) Stacked LSTM blocks
-################################################################################
-
-def stacked_residual_lstm(
-    x,
-    n_blocks=2,
-    units_lstm1=512,
-    units_lstm2=256,
-    dropout_rate=0.0,
-    name_prefix="stacked_lstm"
-):
-    """
-    Example: 2 consecutive residual LSTM blocks:
-      - First block with 512 units
-      - Second block with 256 units
-    We can easily expand to more or tweak the units.
-    """
-    # 1st block
-    out = residual_lstm_block(
-        x,
-        units_lstm=units_lstm1,
-        return_sequences=True,
-        dropout_rate=dropout_rate,
-        name_prefix=f"{name_prefix}_block1"
-    )
-
-    # 2nd block
-    out = residual_lstm_block(
-        out,
-        units_lstm=units_lstm2,
-        return_sequences=True,
-        dropout_rate=dropout_rate,
-        name_prefix=f"{name_prefix}_block2"
-    )
-
-    return out
+    
+    if use_lstm:
+        # LSTM path
+        main_path = layers.LSTM(
+            units,
+            return_sequences=True,
+            dropout=0.0,  # CuDNN compatibility
+            recurrent_dropout=0.0,
+            kernel_regularizer=regularizers.l2(l2_reg),
+            recurrent_regularizer=regularizers.l2(l2_reg/2),  # Less aggressive on recurrent weights
+            name=f"{name_prefix}_lstm",
+            # Use recurrent activation that works better with regularization
+            recurrent_activation='sigmoid'
+        )(x_norm)
+        
+        # Apply dropout after LSTM
+        if dropout_rate > 0:
+            main_path = layers.Dropout(dropout_rate, name=f"{name_prefix}_dropout")(main_path)
+    else:
+        # Dense path with better regularization
+        main_path = layers.Dense(
+            units,
+            activation=activation,
+            kernel_regularizer=regularizers.l2(l2_reg),
+            kernel_initializer='glorot_normal',
+            name=f"{name_prefix}_dense"
+        )(x_norm)
+        
+        # Add batch normalization (helps with dense layers)
+        main_path = layers.BatchNormalization(name=f"{name_prefix}_bn")(main_path)
+        
+        if dropout_rate > 0:
+            main_path = layers.Dropout(dropout_rate, name=f"{name_prefix}_dropout")(main_path)
+    
+    # Project shortcut if dimensions don't match
+    if shortcut.shape[-1] != units:
+        shortcut = layers.Dense(
+            units, 
+            kernel_regularizer=regularizers.l2(l2_reg),
+            name=f"{name_prefix}_shortcut"
+        )(shortcut)
+    
+    # Add skip connection
+    output = layers.Add(name=f"{name_prefix}_add")([main_path, shortcut])
+    
+    return output
 
 ################################################################################
-# 3) Transformer block
+# 3) Simplified time-series encoder with better regularization
 ################################################################################
 
-def transformer_block(
-    x,
-    num_heads=4,
-    ff_dim=512,
-    dropout_rate=0.0,
-    name_prefix="transformer_block"
-):
-    """
-    A single Transformer-style block:
-      1) MultiHeadAttention (self-attention)
-      2) Residual + LayerNorm
-      3) Feed-forward network
-      4) Residual + LayerNorm
-    With optional dropout after MHA + FFN.
-    """
-    # Self-attention
-    attn_output = layers.MultiHeadAttention(
-        num_heads=num_heads,
-        key_dim=x.shape[-1],
-        name=f"{name_prefix}_mha"
-    )(x, x)
-
-    if dropout_rate > 1e-7:
-        attn_output = layers.Dropout(dropout_rate, name=f"{name_prefix}_mha_dropout")(attn_output)
-
-    # Residual + LayerNorm
-    out1 = layers.Add(name=f"{name_prefix}_attn_add")([x, attn_output])
-    out1 = layers.LayerNormalization(name=f"{name_prefix}_attn_norm")(out1)
-
-    # Feed Forward
-    ffn = layers.Dense(ff_dim, activation='relu', name=f"{name_prefix}_ffn_dense1")(out1)
-    if dropout_rate > 1e-7:
-        ffn = layers.Dropout(dropout_rate, name=f"{name_prefix}_ffn_dropout1")(ffn)
-
-    ffn = layers.Dense(out1.shape[-1], name=f"{name_prefix}_ffn_dense2")(ffn)
-
-    if dropout_rate > 1e-7:
-        ffn = layers.Dropout(dropout_rate, name=f"{name_prefix}_ffn_dropout2")(ffn)
-
-    # Residual + LayerNorm
-    out2 = layers.Add(name=f"{name_prefix}_ffn_add")([out1, ffn])
-    out2 = layers.LayerNormalization(name=f"{name_prefix}_ffn_norm")(out2)
-
-    return out2
-
-################################################################################
-# 4) Multiple Transformer blocks in sequence
-################################################################################
-
-def stacked_transformer_blocks(
-    x,
-    n_transformer=2,   # e.g. 2 Transformer blocks
-    num_heads=4,
-    ff_dim=512,
-    dropout_rate=0.0,
-    name_prefix="stacked_transformer"
-):
-    out = x
-    for i in range(n_transformer):
-        out = transformer_block(
-            out,
-            num_heads=num_heads,
-            ff_dim=ff_dim,
-            dropout_rate=dropout_rate,
-            name_prefix=f"{name_prefix}_block{i+1}"
-        )
-    return out
-
-################################################################################
-# 5) Single timeframe encoder: stacked LSTMs -> stacked Transformers -> pooling
-################################################################################
-
-def single_timeframe_encoder(
+def time_series_encoder(
     input_tensor,
-    # LSTM config
-    lstm1_units=512,
-    lstm2_units=256,
-    # Transformer config
-    n_transformer=2,
-    num_heads=4,
-    ff_dim=512,
-    # Others
-    dropout_rate=0.0,
-    name_prefix="timeframe"
+    base_units=64,
+    n_lstm_blocks=2,
+    dropout_rate=0.3,  # Increased dropout
+    l2_reg=0.0005,     # Stronger L2
+    name_prefix="ts_encoder"
 ):
     """
-    Encodes a single time-series branch by:
-      1) Stacked residual LSTMs
-      2) Stacked Transformer blocks
-      3) GlobalAveragePooling
-      4) Dense projection
+    Simplified time-series encoder with better regularization and
+    reduced complexity for better generalization.
     """
-    # 1) Stacked residual LSTMs
-    x = stacked_residual_lstm(
-        input_tensor,
-        n_blocks=2,
-        units_lstm1=lstm1_units,
-        units_lstm2=lstm2_units,
-        dropout_rate=dropout_rate,
-        name_prefix=f"{name_prefix}_lstmstack"
-    )
-
-    # 2) Stacked Transformer blocks
-    x = stacked_transformer_blocks(
-        x,
-        n_transformer=n_transformer,  # e.g. 2
-        num_heads=num_heads,
-        ff_dim=ff_dim,
-        dropout_rate=dropout_rate,
-        name_prefix=f"{name_prefix}_transformerstack"
-    )
-
-    # 3) Global average pooling => (batch, features)
-    x = layers.GlobalAveragePooling1D(name=f"{name_prefix}_gap")(x)
-
-    # 4) Dense projection
-    x = layers.Dense(ff_dim, activation='relu', name=f"{name_prefix}_final_dense")(x)
-    if dropout_rate > 1e-7:
+    # Input normalization
+    x = layers.LayerNormalization(
+        epsilon=1e-5,
+        name=f"{name_prefix}_input_norm"
+    )(input_tensor)
+    
+    # Initial convolution to extract patterns (with stronger regularization)
+    x = layers.Conv1D(
+        base_units, 
+        kernel_size=3, 
+        padding='same',
+        activation='relu',  # Use ReLU for better gradient flow
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name=f"{name_prefix}_conv1d"
+    )(x)
+    
+    # Layer normalization after convolution
+    x = layers.LayerNormalization(
+        epsilon=1e-5,
+        name=f"{name_prefix}_conv_norm"
+    )(x)
+    
+    # Stack fewer LSTM blocks (reduced complexity)
+    for i in range(n_lstm_blocks):
+        # Less aggressive scaling of units
+        block_units = base_units * (min(i+1, 2))  # More conservative unit scaling
+        x = residual_block(
+            x,
+            units=block_units,
+            dropout_rate=dropout_rate,
+            l2_reg=l2_reg,
+            use_lstm=True,
+            name_prefix=f"{name_prefix}_lstm_block{i+1}"
+        )
+    
+    # Simplified pooling (just use average and last-step for stability)
+    avg_pool = layers.GlobalAveragePooling1D(name=f"{name_prefix}_avg_pool")(x)
+    last_step = layers.Lambda(lambda x: x[:, -1, :], name=f"{name_prefix}_last_step")(x)
+    
+    # Concatenate different views
+    x = layers.Concatenate(name=f"{name_prefix}_multi_view")([avg_pool, last_step])
+    
+    # Final encoding with stronger dropout
+    x = layers.Dense(
+        base_units,  # Reduced capacity
+        activation='relu',  # ReLU for more stable gradients
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name=f"{name_prefix}_encoding"
+    )(x)
+    
+    x = layers.BatchNormalization(name=f"{name_prefix}_final_bn")(x)
+    
+    if dropout_rate > 0:
         x = layers.Dropout(dropout_rate, name=f"{name_prefix}_final_dropout")(x)
-
+    
     return x
 
 ################################################################################
-# 6) Full mega multi-timeframe model
+# 4) Optimized multi-timeframe model with better regularization
 ################################################################################
 
 def build_multi_timeframe_model(
@@ -236,127 +205,156 @@ def build_multi_timeframe_model(
     santiment_dim=12,
     ta_dim=63,
     signal_dim=11,
-    # hyperparams
-    dropout_rate=0.1,        # Let’s use 10% dropout
-    lstm_units_5m=(512,256), # tune at will
-    lstm_units_15m=(512,256),
-    lstm_units_1h=(512,256),
-    lstm_units_google=(256,128),
-    n_transformer=2,
-    transformer_heads=8,
-    transformer_ff=512
+    # Improved hyperparameters
+    base_units=48,            # Reduced base units to prevent overfitting
+    dropout_rate=0.35,        # Increased dropout for better regularization
+    l2_reg=0.0005,            # Stronger L2 regularization
+    use_gradient_clipping=True,
 ):
     """
-    Pimped multi-branch model with:
-      - Stacked Residual LSTM blocks
-      - Stacked Transformer blocks
-      - Additional dropout
-      - Large aggregator layers
-      - AdamW optimizer
+    Redesigned multi-timeframe model with:
+    1. Simplified architecture with fewer parameters
+    2. Stronger regularization
+    3. Better balanced feature importance
+    4. Optimized for [-1,1] output range with tanh activation
     """
-
-    # === 5m branch ===
+    # === Input branches (simplified structure) ===
+    
+    # 5m branch (high importance)
     input_5m = layers.Input(shape=(window_5m, feature_5m), name="input_5m")
-    x_5m = single_timeframe_encoder(
+    x_5m = time_series_encoder(
         input_5m,
-        lstm1_units=lstm_units_5m[0],
-        lstm2_units=lstm_units_5m[1],
-        n_transformer=n_transformer,
-        num_heads=transformer_heads,
-        ff_dim=transformer_ff,
+        base_units=base_units * 1.5,  # More balanced scaling
+        n_lstm_blocks=2,  # Reduced depth
         dropout_rate=dropout_rate,
+        l2_reg=l2_reg,
         name_prefix="enc_5m"
     )
-
-    # === 15m branch ===
+    
+    # 15m branch
     input_15m = layers.Input(shape=(window_15m, feature_15m), name="input_15m")
-    x_15m = single_timeframe_encoder(
+    x_15m = time_series_encoder(
         input_15m,
-        lstm1_units=lstm_units_15m[0],
-        lstm2_units=lstm_units_15m[1],
-        n_transformer=n_transformer,
-        num_heads=transformer_heads,
-        ff_dim=transformer_ff,
+        base_units=base_units * 1.5,
+        n_lstm_blocks=2,
         dropout_rate=dropout_rate,
+        l2_reg=l2_reg,
         name_prefix="enc_15m"
     )
-
-    # === 1h branch ===
+    
+    # 1h branch
     input_1h = layers.Input(shape=(window_1h, feature_1h), name="input_1h")
-    x_1h = single_timeframe_encoder(
+    x_1h = time_series_encoder(
         input_1h,
-        lstm1_units=lstm_units_1h[0],
-        lstm2_units=lstm_units_1h[1],
-        n_transformer=n_transformer,
-        num_heads=transformer_heads,
-        ff_dim=transformer_ff,
+        base_units=base_units,
+        n_lstm_blocks=1,  # Simplified
         dropout_rate=dropout_rate,
+        l2_reg=l2_reg,
         name_prefix="enc_1h"
     )
-
-    # === google_trend branch ===
+    
+    # Google trend branch (simplified)
     input_google_trend = layers.Input(
         shape=(window_google_trend, feature_google_trend),
         name="input_google_trend"
     )
-    x_google = single_timeframe_encoder(
+    x_google = time_series_encoder(
         input_google_trend,
-        lstm1_units=lstm_units_google[0],
-        lstm2_units=lstm_units_google[1],
-        n_transformer=n_transformer,
-        num_heads=transformer_heads//2,  # smaller
-        ff_dim=transformer_ff//2,
+        base_units=base_units // 2,
+        n_lstm_blocks=1,
         dropout_rate=dropout_rate,
+        l2_reg=l2_reg,
         name_prefix="enc_google"
     )
-
-    # === Santiment (12-dim) ===
-    input_santiment = layers.Input(shape=(santiment_dim,), name="input_santiment")
-    x_santiment = layers.Dense(128, activation='relu', name="santiment_dense1")(input_santiment)
-    if dropout_rate > 1e-7:
-        x_santiment = layers.Dropout(dropout_rate)(x_santiment)
-    x_santiment = layers.Dense(64, activation='relu', name="santiment_dense2")(x_santiment)
-
-    # === TA (63-dim) ===
-    input_ta = layers.Input(shape=(ta_dim,), name="input_ta")
-    x_ta = layers.Dense(128, activation='relu', name="ta_dense1")(input_ta)
-    if dropout_rate > 1e-7:
-        x_ta = layers.Dropout(dropout_rate)(x_ta)
-    x_ta = layers.Dense(64, activation='relu', name="ta_dense2")(x_ta)
-
-    # === final signal input (11-dim) ===
-    input_signal = layers.Input(shape=(signal_dim,), name="input_signal")
-    x_sig = layers.Dense(128, activation='relu', name="signal_dense1")(input_signal)
-    x_sig = layers.Dense(64, activation='relu', name="signal_dense2")(x_sig)
     
-    # === Merge ALL ===
-    merged_all = layers.concatenate(
-        [x_5m, x_15m, x_1h, x_google, x_santiment, x_ta, x_sig],
-        name="concat_all"
-    )
-
-    # A deeper aggregator with bigger hidden layers
-    x = layers.Dense(1024, activation='relu', name="merged_dense1")(merged_all)
-    if dropout_rate > 1e-7:
-        x = layers.Dropout(dropout_rate)(x)
-    x = layers.Dense(512, activation='relu', name="merged_dense2")(x)
-    if dropout_rate > 1e-7:
-        x = layers.Dropout(dropout_rate)(x)
-    x = layers.Dense(256, activation='relu', name="merged_dense3")(x)
-
-    # === Merge aggregator with signals
-    x_merged_signal = layers.concatenate([x, x_sig], name="concat_signal_branch")
-
-    # Final dense block -> output
-    x2 = layers.Dense(256, activation='relu', name="final_dense1")(x_merged_signal)
-    x2 = layers.Dense(128, activation='relu', name="final_dense2")(x2)
-
-    out = layers.Dense(
+    # === Scalar feature branches (simplified) ===
+    
+    # Santiment processing
+    input_santiment = layers.Input(shape=(santiment_dim,), name="input_santiment")
+    x_santiment = layers.BatchNormalization(name="santiment_bn")(input_santiment)
+    x_santiment = layers.Dense(
+        base_units,
+        activation='relu',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name="santiment_dense1"
+    )(x_santiment)
+    x_santiment = layers.Dropout(dropout_rate, name="santiment_dropout")(x_santiment)
+    
+    # Technical analysis processing (more important)
+    input_ta = layers.Input(shape=(ta_dim,), name="input_ta")
+    x_ta = layers.BatchNormalization(name="ta_bn")(input_ta)
+    x_ta = layers.Dense(
+        base_units * 1.5,
+        activation='relu',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name="ta_dense1"
+    )(x_ta)
+    x_ta = layers.BatchNormalization(name="ta_bn2")(x_ta)
+    x_ta = layers.Dropout(dropout_rate, name="ta_dropout")(x_ta)
+    
+    # Signal processing
+    input_signal = layers.Input(shape=(signal_dim,), name="input_signal")
+    x_signal = layers.BatchNormalization(name="signal_bn")(input_signal)
+    x_signal = layers.Dense(
+        base_units,
+        activation='relu',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name="signal_dense1"
+    )(x_signal)
+    x_signal = layers.Dropout(dropout_rate, name="signal_dropout")(x_signal)
+    
+    # === Feature scaling (more balanced approach) ===
+    # Less extreme scaling differences between features
+    x_5m_scaled = layers.Lambda(lambda x: x * 1.3, name="scale_5m")(x_5m)
+    x_15m_scaled = layers.Lambda(lambda x: x * 1.2, name="scale_15m")(x_15m)
+    x_1h_scaled = layers.Lambda(lambda x: x * 1.0, name="scale_1h")(x_1h)
+    x_google_scaled = layers.Lambda(lambda x: x * 0.7, name="scale_google")(x_google)
+    x_santiment_scaled = layers.Lambda(lambda x: x * 0.7, name="scale_santiment")(x_santiment)
+    x_ta_scaled = layers.Lambda(lambda x: x * 1.2, name="scale_ta")(x_ta)
+    x_signal_scaled = layers.Lambda(lambda x: x * 1.0, name="scale_signal")(x_signal)
+    
+    # === Merge all features ===
+    merged = layers.Concatenate(name="concat_all")([
+        x_5m_scaled, x_15m_scaled, x_1h_scaled,
+        x_google_scaled, x_santiment_scaled,
+        x_ta_scaled, x_signal_scaled
+    ])
+    
+    # === Simplified final processing (fewer layers) ===
+    x = layers.BatchNormalization(name="merged_bn")(merged)
+    
+    # First dense layer
+    x = layers.Dense(
+        base_units * 4,
+        activation='relu',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name="final_dense1"
+    )(x)
+    x = layers.BatchNormalization(name="final_bn1")(x)
+    x = layers.Dropout(dropout_rate, name="final_dropout1")(x)
+    
+    # Second dense layer with skip connection
+    skip = layers.Dense(base_units * 2, name="skip_proj")(merged)
+    x = layers.Dense(
+        base_units * 2,
+        activation='relu',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        name="final_dense2"
+    )(x)
+    x = layers.Add(name="final_skip")([x, skip])
+    x = layers.BatchNormalization(name="final_bn2")(x)
+    x = layers.Dropout(dropout_rate * 0.5, name="final_dropout2")(x) # Lighter dropout before output
+    
+    # Output layer with tanh activation (correct for [-1,1] range)
+    predictions = layers.Dense(
         NUM_FUTURE_STEPS,
-        activation='tanh',
+        activation='tanh',  # Tanh is correct for [-1,1] target range
+        kernel_regularizer=regularizers.l2(l2_reg),
+        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
         name="output"
-    )(x2)
-
+    )(x)
+    
+    # Create model
     model = tf.keras.Model(
         inputs=[
             input_5m,
@@ -367,17 +365,56 @@ def build_multi_timeframe_model(
             input_ta,
             input_signal,
         ],
-        outputs=out,
-        name="mega_multi_timeframe_model"
+        outputs=predictions,
+        name="improved_multi_timeframe_model"
     )
-
-    optimizer = tfa.optimizers.AdamW(
-        learning_rate=0.001,         # Before: 0.0001
-        weight_decay=1e-5,
+    
+    # Improved optimizer setup
+    optimizer = tf.keras.optimizers.Adam(
+        learning_rate=0.0005,  # Slightly higher starting LR for faster convergence
         beta_1=0.9,
         beta_2=0.999,
-        epsilon=1e-7
+        epsilon=1e-7,
+        clipnorm=0.8 if use_gradient_clipping else None,
+        clipvalue=1.0 if use_gradient_clipping else None  # More generous clipping
     )
-
+    
+    # Compile with balanced loss
     model.compile(optimizer=optimizer, loss=weighted_mse_loss)
+    
+    return model
+
+################################################################################
+# 5) Model loader function (keeping the same API)
+################################################################################
+
+def load_advanced_lstm_model(
+    model_5m_window=241,
+    model_15m_window=241,
+    model_1h_window=241,
+    feature_dim=9,
+    santiment_dim=12,
+    ta_dim=63,
+    signal_dim=11,
+    **kwargs  # Accept additional kwargs for compatibility
+):
+    """
+    Factory function that creates and returns the optimized model.
+    """
+    print("Creating improved multi-timeframe model with better regularization...")
+    
+    model = build_multi_timeframe_model(
+        window_5m=model_5m_window,
+        feature_5m=feature_dim,
+        window_15m=model_15m_window,
+        feature_15m=feature_dim,
+        window_1h=model_1h_window,
+        feature_1h=feature_dim,
+        window_google_trend=24,
+        feature_google_trend=1,
+        santiment_dim=santiment_dim,
+        ta_dim=ta_dim,
+        signal_dim=signal_dim
+    )
+    
     return model

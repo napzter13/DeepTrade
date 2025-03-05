@@ -2,11 +2,11 @@
 """
 fitter.py
 
-- Multi-output LSTM with 10 outputs (y_1..y_10).
-- Single-step RL that uses the 10 LSTM outputs as the state dimension.
+- Multi-output LSTM with 5 outputs (y_1..y_5).
+- Single-step RL that uses the 5 LSTM outputs as the state dimension.
 - We assume the training CSV has columns:
      timestamp, arr_5m, arr_15m, arr_1h, arr_google_trend, arr_santiment, arr_ta_63, arr_ctx_11,
-     y_1, y_2, ..., y_10
+     y_1, y_2, ..., y_5
   each y_i in [-1,1].
 
 Usage:
@@ -15,8 +15,7 @@ python fitter.py \
   --csv training_data/training_data.csv \
   --model_out models/advanced_lstm_model.keras \
   --rl_csv training_data/rl_transitions.csv \
-  --rl_out models/rl_DQNAgent.weights.h5 \
-  --rl_state_dim 10
+  --rl_out models/rl_DQNAgent.weights.h5
 """
 
 import os
@@ -30,7 +29,7 @@ from tensorflow.keras import mixed_precision
 from botlib.environment import (
     NUM_FUTURE_STEPS,
 )
-# Import advanced LSTM model builder (must produce Dense(10) final layer!)
+# Import advanced LSTM model builder (must produce Dense(5) final layer!)
 from botlib.models import load_advanced_lstm_model
 
 # For normalizing input data
@@ -104,6 +103,9 @@ class Trainer:
         self.skip_lstm   = skip_lstm
         self.max_rows   = max_rows
 
+        os.makedirs("models", exist_ok=True)
+        os.makedirs("logs_training", exist_ok=True)
+        
         if not skip_lstm:
             self.logger.info(f"Initializing multi-timeframe LSTM model with {NUM_FUTURE_STEPS} outputs.")
             self.model = load_advanced_lstm_model(
@@ -242,7 +244,7 @@ class Trainer:
 
     def train_lstm(self):
         """
-        Train the multi-output LSTM (with 10 outputs) on the loaded data.
+        Train the multi-output LSTM (with 5 outputs) on the loaded data.
         """
         data = self.load_training_data()
         if not data or data[0] is None:
@@ -327,21 +329,50 @@ class Trainer:
             model_scaler
         )
 
-        # Train
-        early_stop = tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss', 
-            patience=self.early_stop_patience, 
-            restore_best_weights=True,
-            verbose=1
-        )
-        
-        reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=2/3,         # Reduce LR by 33%, new LR is 2/3 of the previous LR
-            patience=10,
-            min_lr=1e-7,
-            verbose=1
-        )
+        def create_custom_callbacks():
+            # EarlyStopping
+            early_stop = tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss', 
+                patience=self.early_stop_patience, 
+                restore_best_weights=True,
+                verbose=1
+            )
+            
+            # ReduceLROnPlateau
+            reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=2/3,         # Reduce LR by 33%, new LR is 2/3 of the previous LR
+                patience=10,
+                min_lr=1e-7,
+                verbose=1
+            )
+            
+            # Model checkpoint to save intermediate models
+            checkpoint = tf.keras.callbacks.ModelCheckpoint(
+                f"models/{os.path.basename(self.model_out).split('.')[0]}_ep{{epoch:03d}}_val{{val_loss:.4f}}.keras",
+                monitor='val_loss',
+                save_best_only=True,
+                verbose=1
+            )
+            
+            # TensorBoard for visualization
+            tensorboard = tf.keras.callbacks.TensorBoard(
+                log_dir=f"logs_training/{os.path.basename(self.model_out.replace('models/', '')).split('.')[0]}",
+                histogram_freq=1,
+                update_freq='epoch'
+            )
+            
+            # Custom callback to detect and handle NaN/Inf values
+            class NanInfDetector(tf.keras.callbacks.Callback):
+                def on_epoch_end(self, epoch, logs=None):
+                    if logs and (
+                        tf.math.is_nan(logs.get('loss', 0)) or 
+                        tf.math.is_inf(logs.get('loss', 0))
+                    ):
+                        self.logger.error(f"NaN/Inf detected in loss at epoch {epoch}. Stopping training.")
+                        self.model.stop_training = True
+            
+            return [early_stop, reduce_lr, checkpoint, tensorboard, NanInfDetector()]
 
         self.logger.info(f"Fitting LSTM => output dim={NUM_FUTURE_STEPS}, epochs={self.epochs}, batch={self.batch_size}")
         self.logger.info(f"Chronological split => train={len(Y_train)}, val={len(Y_val)}")
@@ -351,7 +382,7 @@ class Trainer:
                 X_5m_train, X_15m_train, X_1h_train,
                 X_gt_train, X_sa_train, X_ta_train, X_ctx_train
             ],
-            y=Y_train,  # shape(N,10)
+            y=Y_train,  # shape(N,5)
             validation_data=(
                 [
                     X_5m_val, X_15m_val, X_1h_val,
@@ -361,7 +392,7 @@ class Trainer:
             ) if len(Y_val) > 0 else None,
             epochs=self.epochs,
             batch_size=self.batch_size,
-            callbacks=[early_stop, reduce_lr],
+            callbacks=create_custom_callbacks(),
             verbose=1,
             shuffle=False
         )
@@ -379,13 +410,13 @@ class Trainer:
         rl_out: str = "models/rl_DQNAgent.weights.h5",
         rl_epochs: int = 5,
         rl_batches: int = 500,
-        state_dim: int = 10   # <--- changed default to 10 because we feed the 10 LSTM outputs
+        state_dim: int = NUM_FUTURE_STEPS
     ):
         """
         Offline training for a DQN from a CSV of transitions.
 
         Columns: old_state,action,reward,new_state,done
-        - old_state,new_state: JSON array of length=10 (the 10 LSTM outputs).
+        - old_state,new_state: JSON array (the LSTM outputs).
         - action in {LONG, SHORT, HOLD}
         - reward is float (the single-step %change).
         - done is 0 or 1
@@ -490,7 +521,7 @@ def parse_args():
     parser.add_argument("--model_out", type=str, default="models/advanced_lstm_model.keras",
                         help="File path for the LSTM model.")
     parser.add_argument("--epochs", type=int, default=1000, help="LSTM epochs.")
-    parser.add_argument("--early_stop_patience", type=int, default=10, help="early_stop_patience")
+    parser.add_argument("--early_stop_patience", type=int, default=20, help="early_stop_patience")
     parser.add_argument("--batch_size", type=int, default=16, help="LSTM batch size.")
     parser.add_argument("--no_scale", action="store_true",
                         help="Disable feature scaling.")
@@ -508,8 +539,6 @@ def parse_args():
                         help="Offline RL training epochs.")
     parser.add_argument("--rl_batches", type=int, default=500,
                         help="Offline RL mini-batch updates per epoch.")
-    parser.add_argument("--rl_state_dim", type=int, default=10,
-                        help="Dimension of RL state (should match LSTM output=10).")
 
     return parser.parse_args()
 
@@ -542,8 +571,7 @@ if __name__ == "__main__":
 
 
 
-# Before   learning_rate=0.0005:     loss: 0.2082 - val_loss: 0.2415
-# Before   learning_rate=0.001:      loss: 0.2082 - val_loss: 0.2415
-
+# loss: 0.2082 - val_loss: 0.2415
+# loss: 0.1863 - val_loss: 0.2160
 
 # python fitter.py --early_stop_patience 50 --batch_size 32
