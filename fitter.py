@@ -574,4 +574,4 @@ if __name__ == "__main__":
 # loss: 0.2082 - val_loss: 0.2415
 # loss: 0.1863 - val_loss: 0.2160
 
-# python fitter.py --early_stop_patience 50 --batch_size 32
+# python fitter.py --early_stop_patience 50 --batch_size 64
