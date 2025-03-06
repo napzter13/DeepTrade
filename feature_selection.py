@@ -407,31 +407,31 @@ def main():
     )
     logger.info(f"Loaded dataset: X.shape={X.shape}, y.shape={y.shape}")
 
-    # 2) Correlation analysis
-    #    We'll create a DataFrame so we can do correlation among X + y
-    df_features = pd.DataFrame(X, columns=feature_names)
-    df_features["target"] = y
+    # # 2) Correlation analysis
+    # #    We'll create a DataFrame so we can do correlation among X + y
+    # df_features = pd.DataFrame(X, columns=feature_names)
+    # df_features["target"] = y
 
-    logger.info("Running correlation analysis & generating heatmap...")
-    to_drop = run_correlation_analysis(
-        df_features.drop(columns=["target"]),
-        out_path=args.out_dir,
-        threshold=args.corr_threshold
-    )
-    logger.info(f"[Correlation] Number of features correlated above {args.corr_threshold}: {len(to_drop)}")
+    # logger.info("Running correlation analysis & generating heatmap...")
+    # to_drop = run_correlation_analysis(
+    #     df_features.drop(columns=["target"]),
+    #     out_path=args.out_dir,
+    #     threshold=args.corr_threshold
+    # )
+    # logger.info(f"[Correlation] Number of features correlated above {args.corr_threshold}: {len(to_drop)}")
 
-    # 3) PCA
-    logger.info("Running PCA to analyze explained variance...")
-    pca = run_pca(
-        X, feature_names,
-        out_path=args.out_dir,
-        n_components=args.n_components_pca
-    )
+    # # 3) PCA
+    # logger.info("Running PCA to analyze explained variance...")
+    # pca = run_pca(
+    #     X, feature_names,
+    #     out_path=args.out_dir,
+    #     n_components=args.n_components_pca
+    # )
 
     # 4) RFE
     logger.info("Running RFE with RandomForest...")
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=args.test_size, random_state=42
+        X[:2000], y[:2000], test_size=args.test_size, random_state=42
     )
     rfe = run_rfe(
         X_train, y_train, feature_names,
@@ -439,13 +439,13 @@ def main():
         n_features_to_select=args.n_features_rfe
     )
 
-    # 5) SHAP
-    logger.info("Running SHAP analysis with RandomForest on entire dataset (or sample)...")
-    run_shap(
-        X, y, feature_names,
-        out_path=args.out_dir,
-        sample_size=args.shap_sample_size
-    )
+    # # 5) SHAP
+    # logger.info("Running SHAP analysis with RandomForest on entire dataset (or sample)...")
+    # run_shap(
+    #     X, y, feature_names,
+    #     out_path=args.out_dir,
+    #     sample_size=args.shap_sample_size
+    # )
 
     logger.info("Feature selection analysis completed.")
 

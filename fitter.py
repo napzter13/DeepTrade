@@ -521,8 +521,8 @@ def parse_args():
     parser.add_argument("--model_out", type=str, default="models/advanced_lstm_model.keras",
                         help="File path for the LSTM model.")
     parser.add_argument("--epochs", type=int, default=1000, help="LSTM epochs.")
-    parser.add_argument("--early_stop_patience", type=int, default=20, help="early_stop_patience")
-    parser.add_argument("--batch_size", type=int, default=16, help="LSTM batch size.")
+    parser.add_argument("--early_stop_patience", type=int, default=25, help="early_stop_patience")
+    parser.add_argument("--batch_size", type=int, default=64, help="LSTM batch size.")
     parser.add_argument("--no_scale", action="store_true",
                         help="Disable feature scaling.")
     parser.add_argument("--skip_lstm", action="store_true",
@@ -574,4 +574,4 @@ if __name__ == "__main__":
 # loss: 0.2082 - val_loss: 0.2415
 # loss: 0.1863 - val_loss: 0.2160
 
-# python fitter.py --early_stop_patience 50 --batch_size 64
+# python fitter.py --early_stop_patience 50 --batch_size 60

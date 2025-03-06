@@ -18,7 +18,7 @@ from .environment import (
     OPENAI_API_KEY,
     get_logger
 )
-from .nn_model import build_multi_timeframe_model, weighted_mse_loss
+from .nn_model import build_prioritized_model, weighted_mse_loss
 
 logger = get_logger("Models")
 
@@ -166,7 +166,7 @@ def load_advanced_lstm_model(model_5m_window=241, model_15m_window=241, model_1h
         except Exception as e:
             logger.error(f"Error loading advanced multi-input LSTM model: {e}")
     logger.warning("Creating a new advanced multi-input LSTM model from scratch...")
-    m = build_multi_timeframe_model(
+    m = build_prioritized_model(
             window_5m=model_5m_window,   feature_5m=feature_dim,
             window_15m=model_15m_window, feature_15m=feature_dim,
             window_1h=model_1h_window,   feature_1h=feature_dim,
