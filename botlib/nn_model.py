@@ -5,27 +5,23 @@ from .environment import (
 )
 
 ################################################################################
-# 1) Numerically stable loss function to prevent NaN values
+# 1) Enhanced loss function with better training properties
 ################################################################################
 
 def weighted_mse_loss(y_true, y_pred):
     """
-    Enhanced numerically stable MSE with proper handling of financial data.
-    Includes safeguards against NaN/Inf values.
+    Enhanced MSE with better weighting for financial time series.
+    Less aggressive clipping to allow model to learn from outliers.
     """
-    # Cast to float32 for better numerical stability
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
     
-    # Strong focus on near-term predictions with smoother gradient
+    # Strong focus on near-term predictions
     weights = tf.linspace(1.8, 0.8, NUM_FUTURE_STEPS)
     weights = tf.reshape(weights, (1, -1))
     
-    # Clip predictions to prevent extreme values
-    y_pred = tf.clip_by_value(y_pred, -1.0, 1.0)
-    
-    # Squared error with safe handling of numerical issues
-    squared_error = tf.square(tf.clip_by_value(y_true - y_pred, -10.0, 10.0))
+    # Standard squared error without excessive clipping
+    squared_error = tf.square(y_true - y_pred)
     
     # Apply weights
     weighted_squared_error = squared_error * weights
@@ -42,19 +38,19 @@ def weighted_mse_loss(y_true, y_pred):
     return tf.reduce_sum(masked_weighted_error, axis=-1) / num_valid
 
 ################################################################################
-# 2) Stabilized GRU block with safeguards against numerical issues
+# 2) Improved GRU block with better gradient flow
 ################################################################################
 
-def stable_gru_block(
+def improved_gru_block(
     x, 
     units, 
-    dropout_rate=0.35,  # Increased dropout
-    l2_reg=0.0003,      # Increased L2
-    name_prefix="gru_block"
+    dropout_rate=0.25,  # Reduced dropout
+    l2_reg=0.0001,      # Reduced L2
+    name_prefix="gru_block",
+    apply_scaling=True  # Allow disabling scaling
 ):
     """
-    Numerically stable GRU block with residual connection and 
-    safeguards against gradient explosion.
+    Improved GRU block with better balance of regularization.
     """
     # Store shortcut
     shortcut = x
@@ -62,7 +58,7 @@ def stable_gru_block(
     # Normalize input with safe epsilon
     x = layers.LayerNormalization(epsilon=1e-5, name=f"{name_prefix}_ln")(x)
     
-    # GRU layer with conservative initialization
+    # GRU layer with better initialization
     x = layers.GRU(
         units,
         return_sequences=True,
@@ -74,11 +70,11 @@ def stable_gru_block(
         kernel_initializer='glorot_uniform',
         recurrent_initializer='orthogonal',
         kernel_regularizer=regularizers.l2(l2_reg),
-        recurrent_regularizer=regularizers.l2(l2_reg/3),
-        bias_regularizer=regularizers.l2(l2_reg/3),
+        recurrent_regularizer=regularizers.l2(l2_reg/2),
+        bias_regularizer=None,  # No bias regularization
         activity_regularizer=None,
-        kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
-        recurrent_constraint=tf.keras.constraints.MaxNorm(3.0),
+        kernel_constraint=tf.keras.constraints.MaxNorm(5.0),  # Less restrictive
+        recurrent_constraint=tf.keras.constraints.MaxNorm(5.0),  # Less restrictive
         name=f"{name_prefix}_gru"
     )(x)
     
@@ -92,13 +88,14 @@ def stable_gru_block(
             units, 1, padding='same',
             kernel_initializer='he_normal',
             kernel_regularizer=regularizers.l2(l2_reg),
-            kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+            kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
             name=f"{name_prefix}_shortcut"
         )(shortcut)
     
-    # Scale outputs for more stable gradient flow
-    scale_factor = 0.2  # Small scale factor to prevent extreme gradients
-    x = layers.Lambda(lambda x: x * scale_factor, name=f"{name_prefix}_scale")(x)
+    # Scale outputs for better gradient flow - but less aggressively
+    if apply_scaling:
+        scale_factor = 0.5  # Larger scale factor to allow more gradient flow
+        x = layers.Lambda(lambda x: x * scale_factor, name=f"{name_prefix}_scale")(x)
     
     # Add residual connection
     x = layers.Add(name=f"{name_prefix}_add")([x, shortcut])
@@ -106,133 +103,467 @@ def stable_gru_block(
     return x
 
 ################################################################################
-# 3) Enhanced Time Series Encoder with anti-overfitting measures
+# 3) Time Series Encoder adapted for various sequence lengths
 ################################################################################
 
-def enhanced_ts_encoder(
+def ts_encoder_5m(
     input_tensor,
-    base_units=384,  # Slightly reduced to prevent overfitting
+    base_units=384,
     n_blocks=2,
-    importance='medium', # 'high' for 5m/15m, 'medium' for 1h, 'low' for others
-    dropout_rate=0.35,   # Increased dropout
-    l2_reg=0.0003,       # Increased L2
-    name_prefix="ts_encoder"
+    dropout_rate=0.25,
+    l2_reg=0.0001,
+    name_prefix="enc_5m"
 ):
-    """
-    Enhanced time series encoder with anti-overfitting measures and
-    safeguards against numerical instability.
-    """
-    # Scale capacity based on importance with less extreme differences
-    if importance == 'high':
-        scale_factor = 1.0
-        n_filters = base_units // 4
-    elif importance == 'medium':
-        scale_factor = 0.8  # Less reduction
-        n_filters = base_units // 5
-    else:  # 'low'
-        scale_factor = 0.6  # Less reduction
-        n_filters = base_units // 6
+    """Encoder specifically for 5-minute data (241 timesteps)."""
+    # Multi-scale convolution block
+    conv_constraint = tf.keras.constraints.MaxNorm(5.0)
     
-    actual_units = int(base_units * scale_factor)
-    
-    # Normalize the input first for better stability
-    x_norm = layers.LayerNormalization(epsilon=1e-5, name=f"{name_prefix}_input_ln")(input_tensor)
-    
-    # Multi-scale convolution block with weight constraints
-    conv_constraint = tf.keras.constraints.MaxNorm(3.0)
+    n_filters = base_units // 3
     
     conv1 = layers.Conv1D(
         n_filters,
         kernel_size=3,
+        strides=1,
         padding='same',
-        activation='relu',
+        activation='elu',
         kernel_initializer='he_normal',
         kernel_regularizer=regularizers.l2(l2_reg),
         kernel_constraint=conv_constraint,
         name=f"{name_prefix}_conv_s"
-    )(x_norm)
+    )(input_tensor)
     
     conv2 = layers.Conv1D(
         n_filters,
         kernel_size=5,
+        strides=1,
         padding='same',
-        activation='relu',
+        activation='elu',
         kernel_initializer='he_normal',
         kernel_regularizer=regularizers.l2(l2_reg),
         kernel_constraint=conv_constraint,
         name=f"{name_prefix}_conv_m"
-    )(x_norm)
+    )(input_tensor)
     
     conv3 = layers.Conv1D(
         n_filters,
         kernel_size=9,
+        strides=1,
         padding='same',
-        activation='relu',
+        activation='elu',
         kernel_initializer='he_normal',
         kernel_regularizer=regularizers.l2(l2_reg),
         kernel_constraint=conv_constraint,
         name=f"{name_prefix}_conv_l"
-    )(x_norm)
+    )(input_tensor)
     
     # Merge convolutions
     x = layers.Concatenate(name=f"{name_prefix}_conv_concat")([conv1, conv2, conv3])
     
-    # Batch normalization with safe parameters
+    # Batch normalization with stable parameters
     x = layers.BatchNormalization(
-        momentum=0.9, 
+        momentum=0.99, 
         epsilon=1e-5, 
         name=f"{name_prefix}_bn"
     )(x)
     
-    # Apply stabilized GRU blocks
+    # Apply improved GRU blocks
     for i in range(n_blocks):
         # Apply different dropout rates at different depths
         block_dropout = dropout_rate * (1.0 - 0.1 * i)  # Reduce dropout slightly in deeper layers
-        x = stable_gru_block(
+        
+        # Apply scaling only to the last block
+        apply_scaling = (i == n_blocks - 1)
+        
+        x = improved_gru_block(
             x,
-            actual_units,
+            base_units,
             dropout_rate=block_dropout,
             l2_reg=l2_reg,
-            name_prefix=f"{name_prefix}_block{i+1}"
+            name_prefix=f"{name_prefix}_block{i+1}",
+            apply_scaling=apply_scaling
         )
         
-        # Add batch norm between blocks for more stable gradients
+        # Add batch norm between blocks
         if i < n_blocks - 1:
             x = layers.BatchNormalization(
-                momentum=0.9, 
+                momentum=0.99, 
                 epsilon=1e-5, 
                 name=f"{name_prefix}_bn{i+1}"
             )(x)
     
-    # Multi-view pooling with simpler, more stable operations
-    # 1. Global average pooling (most stable)
+    # Multi-view pooling with fixed indices for 5m data
+    # 1. Global average pooling
     avg_pool = layers.GlobalAveragePooling1D(name=f"{name_prefix}_avg_pool")(x)
     
-    # 2. Global max pooling (useful but can be unstable, so we clip)
-    x_for_max = layers.Lambda(
-        lambda x: tf.clip_by_value(x, -5.0, 5.0), 
-        name=f"{name_prefix}_clip_for_max"
-    )(x)
-    max_pool = layers.GlobalMaxPooling1D(name=f"{name_prefix}_max_pool")(x_for_max)
+    # 2. Global max pooling
+    max_pool = layers.GlobalMaxPooling1D(name=f"{name_prefix}_max_pool")(x)
     
     # 3. Last step
     last_step = layers.Lambda(lambda x: x[:, -1, :], name=f"{name_prefix}_last_step")(x)
     
-    # Concatenate pooling methods
-    pooled = layers.Concatenate(name=f"{name_prefix}_pools")([avg_pool, max_pool, last_step])
+    # 4. Quarter and three-quarter points (indices 60 and 180 for 241-length sequences)
+    quarter_step = layers.Lambda(lambda x: x[:, 60, :], name=f"{name_prefix}_quarter_step")(x)
+    three_quarter_step = layers.Lambda(lambda x: x[:, 180, :], name=f"{name_prefix}_three_quarter_step")(x)
     
-    # Final dense encoding
+    # Concatenate pooling methods
+    pooled = layers.Concatenate(name=f"{name_prefix}_pools")([avg_pool, max_pool, last_step, quarter_step, three_quarter_step])
+    
+    # Final dense encoding with ELU activation
     x = layers.Dense(
-        actual_units,
-        activation='relu',
+        base_units,
+        activation='elu',
         kernel_initializer='he_normal',
         kernel_regularizer=regularizers.l2(l2_reg),
-        kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+        kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
         name=f"{name_prefix}_dense"
     )(pooled)
     
     x = layers.BatchNormalization(
-        momentum=0.9,
+        momentum=0.99,
+        epsilon=1e-5,
+        name=f"{name_prefix}_final_bn"
+    )(x)
+    
+    if dropout_rate > 0:
+        x = layers.Dropout(dropout_rate, name=f"{name_prefix}_final_drop")(x)
+    
+    return x
+
+def ts_encoder_15m(
+    input_tensor,
+    base_units=384,
+    n_blocks=2,
+    dropout_rate=0.25,
+    l2_reg=0.0001,
+    name_prefix="enc_15m"
+):
+    """Encoder specifically for 15-minute data (241 timesteps)."""
+    # Multi-scale convolution block
+    conv_constraint = tf.keras.constraints.MaxNorm(5.0)
+    
+    n_filters = base_units // 3
+    
+    conv1 = layers.Conv1D(
+        n_filters,
+        kernel_size=3,
+        strides=1,
+        padding='same',
+        activation='elu',
+        kernel_initializer='he_normal',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        kernel_constraint=conv_constraint,
+        name=f"{name_prefix}_conv_s"
+    )(input_tensor)
+    
+    conv2 = layers.Conv1D(
+        n_filters,
+        kernel_size=5,
+        strides=1,
+        padding='same',
+        activation='elu',
+        kernel_initializer='he_normal',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        kernel_constraint=conv_constraint,
+        name=f"{name_prefix}_conv_m"
+    )(input_tensor)
+    
+    conv3 = layers.Conv1D(
+        n_filters,
+        kernel_size=9,
+        strides=1,
+        padding='same',
+        activation='elu',
+        kernel_initializer='he_normal',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        kernel_constraint=conv_constraint,
+        name=f"{name_prefix}_conv_l"
+    )(input_tensor)
+    
+    # Merge convolutions
+    x = layers.Concatenate(name=f"{name_prefix}_conv_concat")([conv1, conv2, conv3])
+    
+    # Batch normalization with stable parameters
+    x = layers.BatchNormalization(
+        momentum=0.99, 
+        epsilon=1e-5, 
+        name=f"{name_prefix}_bn"
+    )(x)
+    
+    # Apply improved GRU blocks
+    for i in range(n_blocks):
+        # Apply different dropout rates at different depths
+        block_dropout = dropout_rate * (1.0 - 0.1 * i)
+        
+        # Apply scaling only to the last block
+        apply_scaling = (i == n_blocks - 1)
+        
+        x = improved_gru_block(
+            x,
+            base_units,
+            dropout_rate=block_dropout,
+            l2_reg=l2_reg,
+            name_prefix=f"{name_prefix}_block{i+1}",
+            apply_scaling=apply_scaling
+        )
+        
+        # Add batch norm between blocks
+        if i < n_blocks - 1:
+            x = layers.BatchNormalization(
+                momentum=0.99, 
+                epsilon=1e-5, 
+                name=f"{name_prefix}_bn{i+1}"
+            )(x)
+    
+    # Multi-view pooling with fixed indices for 15m data (same as 5m)
+    # 1. Global average pooling
+    avg_pool = layers.GlobalAveragePooling1D(name=f"{name_prefix}_avg_pool")(x)
+    
+    # 2. Global max pooling
+    max_pool = layers.GlobalMaxPooling1D(name=f"{name_prefix}_max_pool")(x)
+    
+    # 3. Last step
+    last_step = layers.Lambda(lambda x: x[:, -1, :], name=f"{name_prefix}_last_step")(x)
+    
+    # 4. Quarter and three-quarter points (indices 60 and 180 for 241-length sequences)
+    quarter_step = layers.Lambda(lambda x: x[:, 60, :], name=f"{name_prefix}_quarter_step")(x)
+    three_quarter_step = layers.Lambda(lambda x: x[:, 180, :], name=f"{name_prefix}_three_quarter_step")(x)
+    
+    # Concatenate pooling methods
+    pooled = layers.Concatenate(name=f"{name_prefix}_pools")([avg_pool, max_pool, last_step, quarter_step, three_quarter_step])
+    
+    # Final dense encoding with ELU activation
+    x = layers.Dense(
+        base_units,
+        activation='elu',
+        kernel_initializer='he_normal',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
+        name=f"{name_prefix}_dense"
+    )(pooled)
+    
+    x = layers.BatchNormalization(
+        momentum=0.99,
+        epsilon=1e-5,
+        name=f"{name_prefix}_final_bn"
+    )(x)
+    
+    if dropout_rate > 0:
+        x = layers.Dropout(dropout_rate, name=f"{name_prefix}_final_drop")(x)
+    
+    return x
+
+def ts_encoder_1h(
+    input_tensor,
+    base_units=384,
+    n_blocks=1,
+    dropout_rate=0.25,
+    l2_reg=0.0001,
+    name_prefix="enc_1h"
+):
+    """Encoder specifically for 1-hour data (241 timesteps)."""
+    # Multi-scale convolution block
+    conv_constraint = tf.keras.constraints.MaxNorm(5.0)
+    
+    n_filters = base_units // 4  # Slightly smaller for 1h data
+    
+    conv1 = layers.Conv1D(
+        n_filters,
+        kernel_size=3,
+        strides=1,
+        padding='same',
+        activation='elu',
+        kernel_initializer='he_normal',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        kernel_constraint=conv_constraint,
+        name=f"{name_prefix}_conv_s"
+    )(input_tensor)
+    
+    conv2 = layers.Conv1D(
+        n_filters,
+        kernel_size=5,
+        strides=1,
+        padding='same',
+        activation='elu',
+        kernel_initializer='he_normal',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        kernel_constraint=conv_constraint,
+        name=f"{name_prefix}_conv_m"
+    )(input_tensor)
+    
+    conv3 = layers.Conv1D(
+        n_filters,
+        kernel_size=9,
+        strides=1,
+        padding='same',
+        activation='elu',
+        kernel_initializer='he_normal',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        kernel_constraint=conv_constraint,
+        name=f"{name_prefix}_conv_l"
+    )(input_tensor)
+    
+    # Merge convolutions
+    x = layers.Concatenate(name=f"{name_prefix}_conv_concat")([conv1, conv2, conv3])
+    
+    # Batch normalization
+    x = layers.BatchNormalization(
+        momentum=0.99, 
+        epsilon=1e-5, 
+        name=f"{name_prefix}_bn"
+    )(x)
+    
+    # Apply improved GRU blocks
+    for i in range(n_blocks):
+        # Apply scaling only to the last block
+        apply_scaling = (i == n_blocks - 1)
+        
+        x = improved_gru_block(
+            x,
+            int(base_units * 0.85),  # Slightly smaller for 1h
+            dropout_rate=dropout_rate,
+            l2_reg=l2_reg,
+            name_prefix=f"{name_prefix}_block{i+1}",
+            apply_scaling=apply_scaling
+        )
+    
+    # Multi-view pooling with fixed indices for 1h data (same as others)
+    # 1. Global average pooling
+    avg_pool = layers.GlobalAveragePooling1D(name=f"{name_prefix}_avg_pool")(x)
+    
+    # 2. Global max pooling
+    max_pool = layers.GlobalMaxPooling1D(name=f"{name_prefix}_max_pool")(x)
+    
+    # 3. Last step
+    last_step = layers.Lambda(lambda x: x[:, -1, :], name=f"{name_prefix}_last_step")(x)
+    
+    # 4. Quarter and three-quarter points (indices 60 and 180 for 241-length sequences)
+    quarter_step = layers.Lambda(lambda x: x[:, 60, :], name=f"{name_prefix}_quarter_step")(x)
+    three_quarter_step = layers.Lambda(lambda x: x[:, 180, :], name=f"{name_prefix}_three_quarter_step")(x)
+    
+    # Concatenate pooling methods
+    pooled = layers.Concatenate(name=f"{name_prefix}_pools")([avg_pool, max_pool, last_step, quarter_step, three_quarter_step])
+    
+    # Final dense encoding
+    x = layers.Dense(
+        int(base_units * 0.85),
+        activation='elu',
+        kernel_initializer='he_normal',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
+        name=f"{name_prefix}_dense"
+    )(pooled)
+    
+    x = layers.BatchNormalization(
+        momentum=0.99,
+        epsilon=1e-5,
+        name=f"{name_prefix}_final_bn"
+    )(x)
+    
+    if dropout_rate > 0:
+        x = layers.Dropout(dropout_rate, name=f"{name_prefix}_final_drop")(x)
+    
+    return x
+
+def ts_encoder_google(
+    input_tensor,
+    base_units=384,
+    n_blocks=1,
+    dropout_rate=0.25,
+    l2_reg=0.0001,
+    name_prefix="enc_google"
+):
+    """Encoder specifically for Google trend data (24 timesteps)."""
+    # Multi-scale convolution block with smaller kernel sizes
+    conv_constraint = tf.keras.constraints.MaxNorm(5.0)
+    
+    n_filters = base_units // 5  # Even smaller for Google trends
+    
+    conv1 = layers.Conv1D(
+        n_filters,
+        kernel_size=2,  # Smaller kernels for shorter sequences
+        strides=1,
+        padding='same',
+        activation='elu',
+        kernel_initializer='he_normal',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        kernel_constraint=conv_constraint,
+        name=f"{name_prefix}_conv_s"
+    )(input_tensor)
+    
+    conv2 = layers.Conv1D(
+        n_filters,
+        kernel_size=3,
+        strides=1,
+        padding='same',
+        activation='elu',
+        kernel_initializer='he_normal',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        kernel_constraint=conv_constraint,
+        name=f"{name_prefix}_conv_m"
+    )(input_tensor)
+    
+    conv3 = layers.Conv1D(
+        n_filters,
+        kernel_size=5,  # Max kernel size of 5 for 24-timestep sequence
+        strides=1,
+        padding='same',
+        activation='elu',
+        kernel_initializer='he_normal',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        kernel_constraint=conv_constraint,
+        name=f"{name_prefix}_conv_l"
+    )(input_tensor)
+    
+    # Merge convolutions
+    x = layers.Concatenate(name=f"{name_prefix}_conv_concat")([conv1, conv2, conv3])
+    
+    # Batch normalization
+    x = layers.BatchNormalization(
+        momentum=0.99, 
+        epsilon=1e-5, 
+        name=f"{name_prefix}_bn"
+    )(x)
+    
+    # Apply GRU blocks
+    for i in range(n_blocks):
+        x = improved_gru_block(
+            x,
+            int(base_units * 0.7),  # Smaller units for Google trends
+            dropout_rate=dropout_rate,
+            l2_reg=l2_reg,
+            name_prefix=f"{name_prefix}_block{i+1}",
+            apply_scaling=True
+        )
+    
+    # Multi-view pooling with fixed indices for Google trend data
+    # 1. Global average pooling
+    avg_pool = layers.GlobalAveragePooling1D(name=f"{name_prefix}_avg_pool")(x)
+    
+    # 2. Global max pooling
+    max_pool = layers.GlobalMaxPooling1D(name=f"{name_prefix}_max_pool")(x)
+    
+    # 3. Last step
+    last_step = layers.Lambda(lambda x: x[:, -1, :], name=f"{name_prefix}_last_step")(x)
+    
+    # 4. Quarter and three-quarter points (indices 6 and 18 for 24-length sequences)
+    quarter_step = layers.Lambda(lambda x: x[:, 6, :], name=f"{name_prefix}_quarter_step")(x)
+    three_quarter_step = layers.Lambda(lambda x: x[:, 18, :], name=f"{name_prefix}_three_quarter_step")(x)
+    
+    # Concatenate pooling methods
+    pooled = layers.Concatenate(name=f"{name_prefix}_pools")([avg_pool, max_pool, last_step, quarter_step, three_quarter_step])
+    
+    # Final dense encoding
+    x = layers.Dense(
+        int(base_units * 0.7),
+        activation='elu',
+        kernel_initializer='he_normal',
+        kernel_regularizer=regularizers.l2(l2_reg),
+        kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
+        name=f"{name_prefix}_dense"
+    )(pooled)
+    
+    x = layers.BatchNormalization(
+        momentum=0.99,
         epsilon=1e-5,
         name=f"{name_prefix}_final_bn"
     )(x)
@@ -243,35 +574,34 @@ def enhanced_ts_encoder(
     return x
 
 ################################################################################
-# 4) Enhanced TA feature processor with stability improvements
+# 4) Enhanced TA feature processor
 ################################################################################
 
 def enhanced_ta_processor(
     input_tensor,
-    base_units=384,  # Slightly reduced
+    base_units=384,
     depth=3,
-    dropout_rate=0.35,  # Increased dropout
-    l2_reg=0.0003,      # Increased L2
+    dropout_rate=0.25,  # Reduced dropout
+    l2_reg=0.0001,      # Reduced L2
     name_prefix="ta_proc"
 ):
     """
-    Enhanced technical analysis processor with stability measures
-    and anti-overfitting regularization.
+    Enhanced technical analysis processor with better input sensitivity.
     """
-    # Initial normalization for better stability
+    # Initial normalization
     x = layers.BatchNormalization(
-        momentum=0.9,
+        momentum=0.99,
         epsilon=1e-5,
         name=f"{name_prefix}_bn"
     )(input_tensor)
     
-    # Initial projection
+    # Initial projection with ELU activation
     x = layers.Dense(
         base_units,
-        activation='relu',
+        activation='elu',  # Changed to ELU
         kernel_initializer='he_normal',
         kernel_regularizer=regularizers.l2(l2_reg),
-        kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+        kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
         name=f"{name_prefix}_proj"
     )(x)
     
@@ -279,41 +609,38 @@ def enhanced_ta_processor(
     for i in range(depth):
         skip = x
         
-        # Progressive dropout reduction for better information flow
-        layer_dropout = dropout_rate * (1.0 - 0.1 * i)
-        
-        # First dense
+        # First dense with ELU
         x = layers.Dense(
             base_units,
-            activation='relu',
+            activation='elu',  # Changed to ELU
             kernel_initializer='he_normal',
             kernel_regularizer=regularizers.l2(l2_reg),
-            kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+            kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
             name=f"{name_prefix}_dense{i+1}_1"
         )(x)
         x = layers.BatchNormalization(
-            momentum=0.9,
+            momentum=0.99,
             epsilon=1e-5,
             name=f"{name_prefix}_bn{i+1}_1"
         )(x)
-        x = layers.Dropout(layer_dropout, name=f"{name_prefix}_drop{i+1}_1")(x)
+        x = layers.Dropout(dropout_rate, name=f"{name_prefix}_drop{i+1}_1")(x)
         
-        # Second dense with smaller units for bottleneck effect
-        bottleneck_units = int(base_units * 0.75)
+        # Second dense with less reduction in units
+        bottleneck_units = int(base_units * 0.8)  # Less reduction
         x = layers.Dense(
             bottleneck_units,
-            activation='relu',
+            activation='elu',  # Changed to ELU
             kernel_initializer='he_normal',
             kernel_regularizer=regularizers.l2(l2_reg),
-            kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+            kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
             name=f"{name_prefix}_dense{i+1}_2"
         )(x)
         x = layers.BatchNormalization(
-            momentum=0.9,
+            momentum=0.99,
             epsilon=1e-5,
             name=f"{name_prefix}_bn{i+1}_2"
         )(x)
-        x = layers.Dropout(layer_dropout, name=f"{name_prefix}_drop{i+1}_2")(x)
+        x = layers.Dropout(dropout_rate, name=f"{name_prefix}_drop{i+1}_2")(x)
         
         # Project skip connection to match dimensions if needed
         if skip.shape[-1] != bottleneck_units:
@@ -321,15 +648,17 @@ def enhanced_ta_processor(
                 bottleneck_units,
                 kernel_initializer='he_normal',
                 kernel_regularizer=regularizers.l2(l2_reg/2),
-                kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+                kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
                 name=f"{name_prefix}_skip_proj{i+1}"
             )(skip)
         
-        # Scale factor for more stable gradients
-        x = layers.Lambda(
-            lambda x: x * 0.2, 
-            name=f"{name_prefix}_scale{i+1}"
-        )(x)
+        # Only apply scaling on the final layer
+        if i == depth - 1:
+            # Less aggressive scaling
+            x = layers.Lambda(
+                lambda x: x * 0.7, 
+                name=f"{name_prefix}_scale{i+1}"
+            )(x)
         
         # Residual connection
         x = layers.Add(name=f"{name_prefix}_add{i+1}")([x, skip])
@@ -337,31 +666,32 @@ def enhanced_ta_processor(
     return x
 
 ################################################################################
-# 5) Standard scalar processor with stability improvements
+# 5) Standard scalar processor with improved sensitivity
 ################################################################################
 
 def scalar_processor(
     input_tensor,
-    base_units=256,  # Slightly reduced
+    base_units=256,
     depth=2,
-    dropout_rate=0.35,  # Increased dropout
-    l2_reg=0.0003,      # Increased L2
+    dropout_rate=0.25,  # Reduced dropout
+    l2_reg=0.0001,      # Reduced L2
     name_prefix="scalar_proc"
 ):
-    """Enhanced standard scalar feature processor with stability improvements."""
+    """Enhanced scalar feature processor with better input sensitivity."""
+    # Input normalization
     x = layers.BatchNormalization(
-        momentum=0.9,
+        momentum=0.99,
         epsilon=1e-5,
         name=f"{name_prefix}_bn"
     )(input_tensor)
     
-    # Initial projection
+    # Initial projection with ELU activation
     x = layers.Dense(
         base_units,
-        activation='relu',
+        activation='elu',  # Changed to ELU
         kernel_initializer='he_normal',
         kernel_regularizer=regularizers.l2(l2_reg),
-        kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+        kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
         name=f"{name_prefix}_proj"
     )(x)
     
@@ -369,27 +699,28 @@ def scalar_processor(
     for i in range(depth):
         skip = x
         
-        # Single dense layer with BN and activation
+        # Dense layer with ELU activation
         x = layers.Dense(
             base_units,
-            activation='relu',
+            activation='elu',  # Changed to ELU
             kernel_initializer='he_normal',
             kernel_regularizer=regularizers.l2(l2_reg),
-            kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+            kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
             name=f"{name_prefix}_dense{i+1}"
         )(x)
         x = layers.BatchNormalization(
-            momentum=0.9,
+            momentum=0.99,
             epsilon=1e-5,
             name=f"{name_prefix}_bn{i+1}"
         )(x)
         x = layers.Dropout(dropout_rate, name=f"{name_prefix}_drop{i+1}")(x)
         
-        # Scale output for stable gradients
-        x = layers.Lambda(
-            lambda x: x * 0.3, 
-            name=f"{name_prefix}_scale{i+1}"
-        )(x)
+        # Only apply scaling on the final layer and less aggressively
+        if i == depth - 1:
+            x = layers.Lambda(
+                lambda x: x * 0.7, 
+                name=f"{name_prefix}_scale{i+1}"
+            )(x)
         
         # Residual connection
         x = layers.Add(name=f"{name_prefix}_add{i+1}")([x, skip])
@@ -397,10 +728,10 @@ def scalar_processor(
     return x
 
 ################################################################################
-# 6) Stabilized high-capacity model with prioritized 5m/15m/TA data
+# 6) Improved high-capacity model with better input sensitivity
 ################################################################################
 
-def build_prioritized_model(
+def build_improved_model(
     window_5m=241,
     feature_5m=9,
     window_15m=241,
@@ -412,29 +743,29 @@ def build_prioritized_model(
     santiment_dim=12,
     ta_dim=63,
     signal_dim=11,
-    # Optimized hyperparameters
-    base_units=384,      # Reduced units to prevent overfitting
-    dropout_rate=0.35,   # Increased dropout
-    l2_reg=0.0003,       # Increased L2
+    # Balanced hyperparameters
+    base_units=384,
+    dropout_rate=0.25,   # Reduced dropout
+    l2_reg=0.0001,       # Reduced L2
     use_gradient_clipping=True,
 ):
     """
-    High-capacity multi-timeframe model with:
-    1. Prioritized 5m, 15m, and TA data processing
-    2. Enhanced numerical stability
-    3. Anti-overfitting measures
-    4. Improved gradient flow
-    5. Safeguards against NaN/Inf values
+    Improved high-capacity multi-timeframe model with:
+    1. Better input sensitivity
+    2. Less excessive regularization
+    3. Better activation functions
+    4. Balanced feature importance
+    5. More effective skip connections
+    6. Fixed shape tensors for all Lambda operations
     """
-    # === Input branches with prioritized encoders ===
+    # === Input branches with specialized encoders for each timeframe ===
     
     # 5m branch (highest importance)
     input_5m = layers.Input(shape=(window_5m, feature_5m), name="input_5m")
-    x_5m = enhanced_ts_encoder(
+    x_5m = ts_encoder_5m(
         input_5m,
         base_units=base_units,
         n_blocks=2,
-        importance='high',  # Highest priority
         dropout_rate=dropout_rate,
         l2_reg=l2_reg,
         name_prefix="enc_5m"
@@ -442,11 +773,10 @@ def build_prioritized_model(
     
     # 15m branch (high importance)
     input_15m = layers.Input(shape=(window_15m, feature_15m), name="input_15m")
-    x_15m = enhanced_ts_encoder(
+    x_15m = ts_encoder_15m(
         input_15m,
         base_units=base_units,
         n_blocks=2,
-        importance='high',  # Highest priority
         dropout_rate=dropout_rate,
         l2_reg=l2_reg,
         name_prefix="enc_15m"
@@ -454,11 +784,10 @@ def build_prioritized_model(
     
     # 1h branch (medium importance)
     input_1h = layers.Input(shape=(window_1h, feature_1h), name="input_1h")
-    x_1h = enhanced_ts_encoder(
+    x_1h = ts_encoder_1h(
         input_1h,
         base_units=base_units,
         n_blocks=1,
-        importance='medium',  # Medium priority
         dropout_rate=dropout_rate,
         l2_reg=l2_reg,
         name_prefix="enc_1h"
@@ -469,17 +798,16 @@ def build_prioritized_model(
         shape=(window_google_trend, feature_google_trend),
         name="input_google_trend"
     )
-    x_google = enhanced_ts_encoder(
+    x_google = ts_encoder_google(
         input_google_trend,
         base_units=base_units,
         n_blocks=1,
-        importance='low',  # Low priority
         dropout_rate=dropout_rate,
         l2_reg=l2_reg,
         name_prefix="enc_google"
     )
     
-    # === Scalar feature branches with prioritized processing ===
+    # === Scalar feature branches with enhanced processing ===
     
     # Technical analysis processing (high importance)
     input_ta = layers.Input(shape=(ta_dim,), name="input_ta")
@@ -514,15 +842,15 @@ def build_prioritized_model(
         name_prefix="signal"
     )
     
-    # === Feature importance weighting based on priorities ===
-    # Explicit high weights for 5m, 15m, and TA with constraints
-    x_5m_scaled = layers.Lambda(lambda x: x * 1.5, name="scale_5m")(x_5m)
-    x_15m_scaled = layers.Lambda(lambda x: x * 1.4, name="scale_15m")(x_15m)
+    # === More balanced feature weighting based on priorities ===
+    # Less extreme weights
+    x_5m_scaled = layers.Lambda(lambda x: x * 1.25, name="scale_5m")(x_5m)
+    x_15m_scaled = layers.Lambda(lambda x: x * 1.20, name="scale_15m")(x_15m)
     x_1h_scaled = layers.Lambda(lambda x: x * 1.0, name="scale_1h")(x_1h)
-    x_google_scaled = layers.Lambda(lambda x: x * 0.7, name="scale_google")(x_google)
-    x_santiment_scaled = layers.Lambda(lambda x: x * 0.8, name="scale_santiment")(x_santiment)
-    x_ta_scaled = layers.Lambda(lambda x: x * 1.3, name="scale_ta")(x_ta)
-    x_signal_scaled = layers.Lambda(lambda x: x * 0.9, name="scale_signal")(x_signal)
+    x_google_scaled = layers.Lambda(lambda x: x * 0.8, name="scale_google")(x_google)
+    x_santiment_scaled = layers.Lambda(lambda x: x * 0.9, name="scale_santiment")(x_santiment)
+    x_ta_scaled = layers.Lambda(lambda x: x * 1.15, name="scale_ta")(x_ta)
+    x_signal_scaled = layers.Lambda(lambda x: x * 0.95, name="scale_signal")(x_signal)
     
     # === Merge all features ===
     merged = layers.Concatenate(name="concat_all")([
@@ -531,58 +859,58 @@ def build_prioritized_model(
         x_ta_scaled, x_signal_scaled
     ])
     
-    # === High-capacity fusion network with stability improvements ===
+    # === High-capacity fusion network with improved gradient flow ===
     x = layers.BatchNormalization(
-        momentum=0.9,
+        momentum=0.99,
         epsilon=1e-5,
         name="merged_bn"
     )(merged)
     
-    # First fusion layer with modest width
+    # First fusion layer with ELU activation
     x = layers.Dense(
-        base_units * 3,  # Slightly reduced width
-        activation='relu',
+        base_units * 3,
+        activation='elu',  # Changed to ELU
         kernel_initializer='he_normal',
         kernel_regularizer=regularizers.l2(l2_reg),
-        kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+        kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
         name="fusion_dense1"
     )(x)
     x = layers.BatchNormalization(
-        momentum=0.9,
+        momentum=0.99,
         epsilon=1e-5,
         name="fusion_bn1"
     )(x)
     x = layers.Dropout(dropout_rate, name="fusion_drop1")(x)
     
-    # Residual block 1 with stability improvements
+    # Residual block 1 with ELU activation
     skip1 = x
     x = layers.Dense(
         base_units * 3,
-        activation='relu',
+        activation='elu',  # Changed to ELU
         kernel_initializer='he_normal',
         kernel_regularizer=regularizers.l2(l2_reg),
-        kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+        kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
         name="fusion_res1_dense1"
     )(x)
     x = layers.BatchNormalization(
-        momentum=0.9,
+        momentum=0.99,
         epsilon=1e-5,
         name="fusion_res1_bn1"
     )(x)
     x = layers.Dropout(dropout_rate, name="fusion_res1_drop1")(x)
     
-    # Second dense with bottleneck
-    bottleneck_units = int(base_units * 2.5)
+    # Less bottlenecking in second dense
+    bottleneck_units = int(base_units * 2.5)  # Less reduction
     x = layers.Dense(
         bottleneck_units,
-        activation='relu',
+        activation='elu',  # Changed to ELU
         kernel_initializer='he_normal',
         kernel_regularizer=regularizers.l2(l2_reg),
-        kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+        kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
         name="fusion_res1_dense2"
     )(x)
     x = layers.BatchNormalization(
-        momentum=0.9,
+        momentum=0.99,
         epsilon=1e-5,
         name="fusion_res1_bn2"
     )(x)
@@ -592,65 +920,71 @@ def build_prioritized_model(
         bottleneck_units,
         kernel_initializer='he_normal',
         kernel_regularizer=regularizers.l2(l2_reg/2),
-        kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+        kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
         name="fusion_res1_skip_proj"
     )(skip1)
     
-    # Scale output for gradient stability
-    x = layers.Lambda(lambda x: x * 0.2, name="fusion_res1_scale")(x)
+    # Less aggressive scaling
+    x = layers.Lambda(lambda x: x * 0.7, name="fusion_res1_scale")(x)
     
     # Add skip connection
     x = layers.Add(name="fusion_res1_add")([x, skip1_proj])
     
-    # Direct connection from 5m, 15m, and TA to improve gradient flow
-    # Project these important features to match dimensions
+    # Direct connection from raw input features to improve sensitivity
+    # Project these important features to match dimensions but with less scaling
     priority_features = layers.Concatenate(name="priority_concat")([
-        x_5m_scaled, x_15m_scaled, x_ta_scaled
+        x_5m, x_15m, x_ta  # Use raw unscaled features for more diversity
     ])
     
-    # Project to match dimensions with stability constraints
+    # Project to match dimensions
     priority_projection = layers.Dense(
         bottleneck_units,
+        activation='elu',  # ELU activation
         kernel_initializer='he_normal',
         kernel_regularizer=regularizers.l2(l2_reg/2),
-        kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
-        activation='relu',
+        kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
         name="priority_proj"
     )(priority_features)
     
-    # Add direct connection with scaling
+    # Less aggressive scaling of priority features
     priority_projection = layers.Lambda(
-        lambda x: x * 0.3, 
+        lambda x: x * 0.5, 
         name="priority_scale"
     )(priority_projection)
     
+    # Add direct connection
     x = layers.Add(name="fusion_priority_add")([x, priority_projection])
     
     # Final layer before output
     x = layers.BatchNormalization(
-        momentum=0.9,
+        momentum=0.99,
         epsilon=1e-5,
         name="fusion_final_bn"
     )(x)
     
     x = layers.Dense(
         base_units,
-        activation='relu',
+        activation='elu',  # Changed to ELU
         kernel_initializer='he_normal',
         kernel_regularizer=regularizers.l2(l2_reg),
-        kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+        kernel_constraint=tf.keras.constraints.MaxNorm(5.0),
         name="fusion_dense_final"
     )(x)
     
     x = layers.Dropout(dropout_rate * 0.5, name="fusion_drop_final")(x)
     
-    # Final prediction layer with careful initialization
+    # Add noise layer to break symmetry if the model gets stuck
+    # This helps prevent the model from outputting identical values
+    x = layers.GaussianNoise(0.01, name="noise_layer")(x)
+    
+    # Final prediction layer with careful initialization and NO CONSTRAINT
+    # Constraints on the final layer can cause identical outputs
     predictions = layers.Dense(
         NUM_FUTURE_STEPS,
-        activation='tanh',  # Correct for [-1,1] target range
-        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
-        kernel_regularizer=regularizers.l2(l2_reg/2),
-        kernel_constraint=tf.keras.constraints.MaxNorm(3.0),
+        activation='tanh',
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=42),
+        kernel_regularizer=regularizers.l2(l2_reg/4),  # Less regularization
+        kernel_constraint=None,  # No constraint on output layer
         name="output"
     )(x)
     
@@ -666,20 +1000,20 @@ def build_prioritized_model(
             input_signal,
         ],
         outputs=predictions,
-        name="stable_prioritized_model"
+        name="improved_responsive_model"
     )
     
-    # Optimizer setup with gradient clipping for stability
+    # Optimizer setup with less aggressive gradient clipping
     optimizer = tf.keras.optimizers.Adam(
         learning_rate=0.001,
         beta_1=0.9,
         beta_2=0.999,
         epsilon=1e-7,
-        clipnorm=0.8 if use_gradient_clipping else None,  # Tighter norm clipping
-        clipvalue=3.0 if use_gradient_clipping else None  # Tighter value clipping
+        clipnorm=1.0 if use_gradient_clipping else None,  # Less aggressive norm clipping
+        clipvalue=5.0 if use_gradient_clipping else None  # Less aggressive value clipping
     )
     
-    # Compile with enhanced numerically stable loss
+    # Compile with improved loss
     model.compile(optimizer=optimizer, loss=weighted_mse_loss)
     
     return model
@@ -699,12 +1033,12 @@ def load_advanced_lstm_model(
     **kwargs  # Accept additional kwargs for compatibility
 ):
     """
-    Factory function that creates and returns the stabilized high-capacity model
-    with prioritized 5m, 15m, and TA data processing.
+    Factory function that creates and returns the improved model
+    with better input sensitivity and response to different features.
     """
-    print("Creating stabilized high-capacity model with prioritized 5m, 15m, and TA data...")
+    print("Creating specialized time series encoders for different timestep sequences...")
     
-    model = build_prioritized_model(
+    model = build_improved_model(
         window_5m=model_5m_window,
         feature_5m=feature_dim,
         window_15m=model_15m_window,

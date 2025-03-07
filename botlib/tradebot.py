@@ -267,6 +267,8 @@ class TradingBot:
             self.model_scaler
         )
         try:
+            # DEBUG:
+            print(s_ta)
             raw_pred = self.advanced_model.predict(
                 [s_5m, s_15m, s_1h, s_gt, s_sa, s_ta, s_ctx],
                 verbose=0
