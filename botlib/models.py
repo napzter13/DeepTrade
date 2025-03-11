@@ -18,7 +18,7 @@ from .environment import (
     OPENAI_API_KEY,
     get_logger
 )
-from .nn_model import build_improved_model, weighted_mse_loss
+from .nn_model import build_ensemble_model, safe_mse_loss
 
 logger = get_logger("Models")
 
@@ -154,24 +154,41 @@ If you are unsure, provide your best estimate within the specified range."""
         return 0.0
     
 
-def load_advanced_lstm_model(model_5m_window=241, model_15m_window=241, model_1h_window=241, feature_dim=9, santiment_dim=12, ta_dim=63, signal_dim=11):
+def load_advanced_lstm_model(model_5m_window=241, 
+                             model_15m_window=241, 
+                             model_1h_window=241, 
+                             feature_dim=9, 
+                             santiment_dim=12, 
+                             ta_dim=63, 
+                             signal_dim=11,
+                             base_units=256,
+                             memory_efficient=True,
+                             mixed_precision=True,
+                             gradient_accumulation=False,
+                             gradient_accumulation_steps=8
+                             ):
     if os.path.exists(ADVANCED_MODEL_PATH):
         try:
             loaded = tf.keras.models.load_model(
                 ADVANCED_MODEL_PATH,
-                custom_objects={"weighted_mse_loss": weighted_mse_loss}
+                custom_objects={"safe_mse_loss": safe_mse_loss}
             )
             logger.info("Loaded advanced multi-input LSTM model from disk.")
             return loaded
         except Exception as e:
             logger.error(f"Error loading advanced multi-input LSTM model: {e}")
     logger.warning("Creating a new advanced multi-input LSTM model from scratch...")
-    m = build_improved_model(
+    m = build_ensemble_model(
             window_5m=model_5m_window,   feature_5m=feature_dim,
             window_15m=model_15m_window, feature_15m=feature_dim,
             window_1h=model_1h_window,   feature_1h=feature_dim,
             santiment_dim=santiment_dim,
-            ta_dim=ta_dim,      signal_dim=signal_dim)
+            ta_dim=ta_dim,      signal_dim=signal_dim,
+            base_units = base_units,
+            memory_efficient = memory_efficient,
+            mixed_precision = mixed_precision,
+            gradient_accumulation = gradient_accumulation,
+            gradient_accumulation_steps = gradient_accumulation_steps)
     
     plot_model(m, to_file="models/advanced_lstm_model_architecture.png", show_shapes=True, show_layer_names=True)
     
