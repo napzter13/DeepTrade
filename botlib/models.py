@@ -19,6 +19,8 @@ from .environment import (
     get_logger
 )
 from .nn_model import build_ensemble_model, safe_mse_loss
+# Add these imports to expose the classes needed by fitter.py
+from .nn_model import TimeSeriesEncoder, TabularEncoder, LightEnsembleModel
 
 logger = get_logger("Models")
 
@@ -127,8 +129,8 @@ You receive updated market and sentiment data for BTC every hour. Your role is t
 **Output Requirements**:
 - Output must be exactly ONE integer.
 - This integer must be in the range [-100, 100].
-- A positive integer (e.g., 50) means “Buy that percentage of available EUR in BTC” (i.e., go long).
-- A negative integer (e.g., -30) means “Sell that percentage of BTC” (i.e., go short if you have BTC, or remain 0 if you have none).
+- A positive integer (e.g., 50) means "Buy that percentage of available EUR in BTC" (i.e., go long).
+- A negative integer (e.g., -30) means "Sell that percentage of BTC" (i.e., go short if you have BTC, or remain 0 if you have none).
 - Do not include any text, explanations, disclaimers, or any other characters besides this integer.
 
 If you are unsure, provide your best estimate within the specified range."""

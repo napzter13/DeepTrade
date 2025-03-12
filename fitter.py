@@ -401,9 +401,9 @@ class Trainer:
             epoch_start_time = time.time()
             self.logger.info(f"Epoch {epoch+1}/{self.epochs}")
             
-            # Reset metrics
-            train_loss.reset_states()
-            train_mae.reset_states()
+            # Reset metrics - FIXED: use reset() instead of reset_states()
+            train_loss.reset()
+            train_mae.reset()
             
             # Manual batching and gradient accumulation
             accumulated_gradients = None
@@ -482,9 +482,9 @@ class Trainer:
             
             # Validation if available
             if has_validation:
-                # Reset validation metrics
-                val_loss.reset_states()
-                val_mae.reset_states()
+                # Reset validation metrics - FIXED: use reset() instead of reset_states()
+                val_loss.reset()
+                val_mae.reset()
                 
                 # Process validation in batches
                 for val_step in range(val_steps):
@@ -508,7 +508,7 @@ class Trainer:
                     # Forward pass
                     y_pred = self.model(
                         [X_5m_val_batch, X_15m_val_batch, X_1h_val_batch, X_gt_val_batch, 
-                         X_sa_val_batch, X_ta_val_batch, X_ctx_val_batch], 
+                        X_sa_val_batch, X_ta_val_batch, X_ctx_val_batch], 
                         training=False
                     )
                     
@@ -978,6 +978,6 @@ def main():
 if __name__ == "__main__":
     main()
     
-# python fitter.py --model_size large --batch_size 32 --grad_accum --accum_steps 4
+# python fitter.py --no_reduce_precision --batch_size 8 --model_size small --grad_accum --accum_steps 4
 # tensorboard --logdir=logs_training
 # nvidia-smi -l 1
