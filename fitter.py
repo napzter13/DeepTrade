@@ -1181,19 +1181,22 @@ if __name__ == "__main__":
     main()
     
     
-    
-    
-    
-# Usage examples:
-# 
-# For massive model (500MB+):
-# python fitter.py --model_size massive --batch_size 4 --grad_accum --accum_steps 8 --rl_epochs 10 --no_reduce_precision
-#
-# For gigantic model (1GB+):
-# python fitter.py --model_size gigantic --batch_size 2 --grad_accum --accum_steps 16 --rl_epochs 5 --no_reduce_precision
-#
+
+
+
+
 
 # conda activate env3
+
+
+# For large debug model:
+# python fitter.py --model_size large --batch_size 2 --grad_accum --accum_steps 1 --skip_rl --no_reduce_precision
+
+# For gigantic model:
+# python fitter.py --model_size gigantic --batch_size 2 --grad_accum --accum_steps 16 --rl_epochs 5 --no_reduce_precision
+
+
 # dir_print . -I .git .gitignore dir_print.txt ^.md^ ^.png^ ^.csv^ ^.json^ ^.pyc^ ^input_cache^ ^logs_training^ -O ^.env^ ^config^ ^.txt^ ^.log^ -E dir_print.txt --sos --line-count
+
 # tensorboard --logdir=logs_training
 # nvidia-smi -l 1
