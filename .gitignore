@@ -9,4 +9,5 @@ training_data/
 models/*
 logs_training/*
 !models/advanced_lstm_model_architecture.png
-
+dir_print.txt
+training.log

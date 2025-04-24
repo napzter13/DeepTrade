@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-fitter.py - Ultra-optimized version for memory-constrained environments
+fitter.py - Ultra-optimized version for massive model training
 
 Usage:
-python fitter.py --model_size small --batch_size 2 --grad_accum --accum_steps 16
+python fitter.py --model_size massive --batch_size 4 --grad_accum --accum_steps 8 --rl_epochs 10
+
+This version is optimized for training 500MB+ models with sophisticated memory management
+and gradient accumulation techniques.
 """
 
 import os
@@ -25,6 +28,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
+        logging.FileHandler("training.log"),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -41,7 +45,7 @@ try:
     from botlib.models import load_advanced_lstm_model
     from botlib.input_preprocessing import ModelScaler, prepare_for_model_inputs
     from botlib.rl import DQNAgent, ACTIONS
-    from botlib.models import safe_mse_loss, TimeSeriesEncoder, TabularEncoder, LightEnsembleModel
+    from botlib.nn_model import safe_mse_loss
 except ImportError as e:
     logger.error(f"Failed to import required modules: {e}")
     print(f"ERROR: Failed to import required modules: {e}")
@@ -50,12 +54,279 @@ except ImportError as e:
 
 # Constants
 RL_TRANSITIONS_FILE = os.path.join("training_data", "rl_transitions.csv")
+LSTM_DATA_FILE = os.path.join("training_data", "lstm_samples.csv")
+
+# Optimize GPU setup
+def setup_gpu():
+    """Configure GPU for optimal training performance with massive models"""
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            # Enable memory growth for each GPU
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            
+            # Try to enable tensor cores for better performance
+            try:
+                tf.config.experimental.enable_tensor_float_32_execution(True)
+            except:
+                pass
+                
+            # Enable XLA compilation
+            try:
+                tf.config.optimizer.set_jit(True)
+            except:
+                pass
+            
+            # Set memory limit per GPU (to avoid OOM with massive models)
+            try:
+                for i, gpu in enumerate(gpus):
+                    # Leave 10% memory free for system
+                    memory_limit = int(tf.config.experimental.get_memory_info(gpu)['total'] * 0.9)
+                    tf.config.experimental.set_virtual_device_configuration(
+                        gpu,
+                        [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=memory_limit)]
+                    )
+                    logger.info(f"Set memory limit for GPU {i} to {memory_limit/1024/1024:.2f} MB")
+            except Exception as e:
+                logger.warning(f"Could not set GPU memory limits: {e}")
+                
+            logger.info(f"GPU setup complete. Found {len(gpus)} GPU(s)")
+            return True
+        except RuntimeError as e:
+            logger.error(f"GPU setup error: {e}")
+    
+    logger.warning("No GPUs found. Running on CPU only.")
+    return False
+
+# Call GPU setup
+setup_gpu()
+
+# Enhanced data batch generator with smart caching for memory efficiency
+class MemoryEfficientGenerator(tf.keras.utils.Sequence):
+    """Data generator with caching and memory management optimized for massive models"""
+    
+    def __init__(self, 
+                 csv_file, 
+                 batch_size=4,  # Smaller batch size for massive models
+                 shuffle=True, 
+                 validation=False, 
+                 val_split=0.2,
+                 max_rows=None,
+                 scaler=None,
+                 cache_size=32):  # Cache a few batches to speed up training
+        """Initialize the generator"""
+        self.csv_file = csv_file
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.validation = validation
+        self.val_split = val_split
+        self.max_rows = max_rows
+        self.scaler = scaler
+        self.cache_size = cache_size
+        self.cache = {}  # Batch cache to speed up training
+        
+        # Count rows in CSV file
+        self.total_rows = self._count_rows()
+        
+        # Limit rows if specified
+        if self.max_rows and self.max_rows < self.total_rows:
+            self.total_rows = self.max_rows
+            
+        # Split data indices
+        if validation:
+            # Validation set (last val_split portion)
+            self.start_idx = int(self.total_rows * (1 - val_split))
+            self.end_idx = self.total_rows
+        else:
+            # Training set (first 1-val_split portion)
+            self.start_idx = 0
+            self.end_idx = int(self.total_rows * (1 - val_split))
+            
+        # Row indices for batch selection
+        self.indices = list(range(1, self.end_idx - self.start_idx + 1))
+        
+        # Shuffle indices if needed
+        if self.shuffle:
+            np.random.shuffle(self.indices)
+            
+        # Preload column indices for faster parsing
+        self._preload_column_indices()
+            
+        logger.info(f"Generator created with {len(self.indices)} {'validation' if validation else 'training'} samples")
+        
+    def _preload_column_indices(self):
+        """Preload column indices to speed up CSV parsing"""
+        try:
+            with open(self.csv_file, 'r') as f:
+                reader = csv.reader(f)
+                header = next(reader)
+                self.column_indices = {name: i for i, name in enumerate(header)}
+                
+                # Check required columns
+                required_columns = ["arr_5m", "arr_15m", "arr_1h", "arr_google_trend", 
+                                   "arr_santiment", "arr_ta_63", "arr_ctx_11"]
+                
+                missing = [col for col in required_columns if col not in self.column_indices]
+                if missing:
+                    logger.error(f"Missing required columns in CSV: {missing}")
+                    
+                # Check y columns
+                self.y_columns = []
+                for i in range(1, NUM_FUTURE_STEPS+1):
+                    col = f"y_{i}"
+                    if col in self.column_indices:
+                        self.y_columns.append(col)
+                    else:
+                        logger.warning(f"Missing target column {col}")
+                
+                logger.info(f"Found {len(self.y_columns)} target columns")
+        except Exception as e:
+            logger.error(f"Error preloading column indices: {e}")
+            self.column_indices = {}
+            self.y_columns = [f"y_{i}" for i in range(1, NUM_FUTURE_STEPS+1)]
+    
+    def _count_rows(self):
+        """Count the number of data rows in the CSV file"""
+        try:
+            with open(self.csv_file, 'r') as f:
+                # Skip header
+                next(f)
+                count = sum(1 for _ in f)
+            return count
+        except Exception as e:
+            logger.error(f"Error counting rows in {self.csv_file}: {e}")
+            return 0
+            
+    def __len__(self):
+        """Return the number of batches per epoch"""
+        return math.ceil(len(self.indices) / self.batch_size)
+        
+    def __getitem__(self, idx):
+        """Get a batch of data with caching for efficiency"""
+        # Check if batch is in cache
+        if idx in self.cache:
+            return self.cache[idx]
+            
+        # Get batch indices
+        batch_indices = self.indices[idx * self.batch_size : (idx + 1) * self.batch_size]
+        
+        # Initialize batch arrays
+        batch_5m = []
+        batch_15m = []
+        batch_1h = []
+        batch_google = []
+        batch_santiment = []
+        batch_ta = []
+        batch_ctx = []
+        batch_y = []
+        
+        # Load data from CSV file
+        with open(self.csv_file, 'r') as f:
+            reader = csv.reader(f)
+            # Skip header
+            next(reader)
+            
+            for i, row in enumerate(reader, 1):
+                if i in batch_indices:
+                    try:
+                        # Use column indices for faster access
+                        arr_5m = np.array(json.loads(row[self.column_indices["arr_5m"]])[0], dtype=np.float32)
+                        arr_15m = np.array(json.loads(row[self.column_indices["arr_15m"]])[0], dtype=np.float32)
+                        arr_1h = np.array(json.loads(row[self.column_indices["arr_1h"]])[0], dtype=np.float32)
+                        arr_google_trend = np.array(json.loads(row[self.column_indices["arr_google_trend"]])[0], dtype=np.float32)
+                        arr_santiment = np.array(json.loads(row[self.column_indices["arr_santiment"]])[0], dtype=np.float32)
+                        arr_ta = np.array(json.loads(row[self.column_indices["arr_ta_63"]])[0], dtype=np.float32)
+                        arr_ctx = np.array(json.loads(row[self.column_indices["arr_ctx_11"]])[0], dtype=np.float32)
+                        
+                        # Parse target values
+                        targets = []
+                        for col in self.y_columns:
+                            val = float(row[self.column_indices[col]])
+                            targets.append(val)
+                        
+                        # Fill in missing targets if needed
+                        while len(targets) < NUM_FUTURE_STEPS:
+                            targets.append(0.0)
+                        
+                        # Apply scaling if available
+                        if self.scaler:
+                            arr_5m, arr_15m, arr_1h, arr_google_trend, arr_santiment, arr_ta, arr_ctx = prepare_for_model_inputs(
+                                arr_5m, arr_15m, arr_1h,
+                                arr_google_trend, arr_santiment,
+                                arr_ta, arr_ctx,
+                                self.scaler
+                            )
+                        
+                        # Reshape time series data
+                        arr_5m = arr_5m.reshape(1, arr_5m.shape[0], arr_5m.shape[1])
+                        arr_15m = arr_15m.reshape(1, arr_15m.shape[0], arr_15m.shape[1])
+                        arr_1h = arr_1h.reshape(1, arr_1h.shape[0], arr_1h.shape[1])
+                        arr_google_trend = arr_google_trend.reshape(1, arr_google_trend.shape[0], 1)
+                        
+                        # Add to batch
+                        batch_5m.append(arr_5m)
+                        batch_15m.append(arr_15m)
+                        batch_1h.append(arr_1h)
+                        batch_google.append(arr_google_trend)
+                        batch_santiment.append(arr_santiment)
+                        batch_ta.append(arr_ta)
+                        batch_ctx.append(arr_ctx)
+                        batch_y.append(targets)
+                    except Exception as e:
+                        logger.error(f"Error parsing row {i}: {e}")
+        
+        # Convert to numpy arrays
+        try:
+            # Concatenate along batch dimension
+            X_5m = np.concatenate(batch_5m, axis=0) if batch_5m else np.empty((0, 241, 9))
+            X_15m = np.concatenate(batch_15m, axis=0) if batch_15m else np.empty((0, 241, 9))
+            X_1h = np.concatenate(batch_1h, axis=0) if batch_1h else np.empty((0, 241, 9))
+            X_google = np.concatenate(batch_google, axis=0) if batch_google else np.empty((0, 24, 1))
+            X_santiment = np.array(batch_santiment) if batch_santiment else np.empty((0, 12))
+            X_ta = np.array(batch_ta) if batch_ta else np.empty((0, 63))
+            X_ctx = np.array(batch_ctx) if batch_ctx else np.empty((0, 11))
+            Y = np.array(batch_y) if batch_y else np.empty((0, NUM_FUTURE_STEPS))
+            
+            # Create result batch
+            result = ([X_5m, X_15m, X_1h, X_google, X_santiment, X_ta, X_ctx], Y)
+            
+            # Store in cache if cache is enabled
+            if self.cache_size > 0:
+                # Manage cache size
+                if len(self.cache) >= self.cache_size:
+                    # Remove oldest entry
+                    oldest_key = next(iter(self.cache))
+                    del self.cache[oldest_key]
+                
+                # Add to cache
+                self.cache[idx] = result
+            
+            return result
+        except Exception as e:
+            logger.error(f"Error creating batch: {e}")
+            # Return empty batch as fallback
+            empty_shape_5m = (0, 241, 9)
+            empty_shape_google = (0, 24, 1)
+            return [np.empty(empty_shape_5m), np.empty(empty_shape_5m), np.empty(empty_shape_5m), 
+                    np.empty(empty_shape_google), np.empty((0, 12)), np.empty((0, 63)), np.empty((0, 11))], np.empty((0, NUM_FUTURE_STEPS))
+                    
+    def on_epoch_end(self):
+        """Called at the end of each epoch"""
+        if self.shuffle:
+            np.random.shuffle(self.indices)
+            
+            # Clear cache when shuffling
+            self.cache.clear()
+
 
 class Trainer:
     def __init__(
         self,
-        training_csv="training_data/training_data.csv",
+        training_csv=LSTM_DATA_FILE,
         model_out="models/advanced_lstm_model.keras",
+        rl_transitions_csv=RL_TRANSITIONS_FILE,
+        rl_model_out="models/rl_DQNAgent.weights.h5",
         window_5m=241,
         feature_5m=9,
         window_15m=241,
@@ -69,19 +340,23 @@ class Trainer:
         signal_dim=11,
         epochs=100,
         early_stop_patience=20,
-        batch_size=2,
+        batch_size=4,  # Smaller batch size for massive models
+        rl_batch_size=64,
         apply_scaling=True,
         train_ratio=0.8,
         val_ratio=0.2,
         skip_lstm=False,
+        skip_rl=False,
         max_rows=0,
         grad_accum=True,
-        accum_steps=16,
-        model_size="small",
-        reduce_precision=True
+        accum_steps=8,  # More accumulation steps for massive models
+        model_size="massive",  # New default is massive
+        reduce_precision=True,
+        rl_epochs=10,
+        cache_batches=16  # Cache some batches for faster training
     ):
         """
-        Ultra-optimized Trainer for memory-constrained environments
+        Ultra-optimized Trainer for massive models (500MB+)
         """
         self.logger = logger
         
@@ -91,6 +366,8 @@ class Trainer:
         
         self.training_csv = training_csv
         self.model_out = model_out
+        self.rl_transitions_csv = rl_transitions_csv
+        self.rl_model_out = rl_model_out
         self.window_5m = window_5m
         self.feature_5m = feature_5m
         self.window_15m = window_15m
@@ -105,100 +382,97 @@ class Trainer:
         self.epochs = epochs
         self.early_stop_patience = early_stop_patience
         self.batch_size = batch_size
+        self.rl_batch_size = rl_batch_size
         self.apply_scaling = apply_scaling
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
         self.skip_lstm = skip_lstm
+        self.skip_rl = skip_rl
         self.max_rows = max_rows
         self.grad_accum = grad_accum
         self.accum_steps = accum_steps
         self.model_size = model_size
         self.reduce_precision = reduce_precision
+        self.rl_epochs = rl_epochs
+        self.cache_batches = cache_batches
         
         # Set base units based on model size
         base_units_map = {
-            "tiny": 24,
-            "small": 32,
-            "medium": 48,
-            "large": 64,
-            "xlarge": 96
+            "tiny": 32,
+            "small": 48,
+            "medium": 64,
+            "large": 96,
+            "xlarge": 128,
+            "massive": 512,  # New massive size
+            "gigantic": 1024  # Ultra massive size
         }
-        self.base_units = base_units_map.get(model_size, 32)
+        self.base_units = base_units_map.get(model_size, 512)
+        
+        # Set depth based on model size
+        depth_map = {
+            "tiny": 2,
+            "small": 2,
+            "medium": 3,
+            "large": 4,
+            "xlarge": 5,
+            "massive": 6,
+            "gigantic": 8  
+        }
+        self.depth = depth_map.get(model_size, 6)
+
+        # Initialize model scaler
+        self.model_scaler = None
+        if self.apply_scaling:
+            try:
+                self.model_scaler = ModelScaler.load("models/scalers.pkl")
+                self.logger.info("Loaded model scalers from models/scalers.pkl.")
+            except:
+                self.logger.warning("No scalers found. Will fit new scalers.")
+                self.model_scaler = ModelScaler()
 
         # Verify training data file exists
         if not os.path.exists(self.training_csv):
             self.logger.error(f"Training data file not found: {self.training_csv}")
             print(f"ERROR: Training data file not found: {self.training_csv}")
-            return
+        else:
+            self.logger.info(f"Training data file found: {self.training_csv}")
             
         # Initialize model if not skipping LSTM training
         if not skip_lstm:
-            self.logger.info(f"Initializing model with {NUM_FUTURE_STEPS} outputs and {self.base_units} units")
+            self.logger.info(f"Initializing MASSIVE model with {NUM_FUTURE_STEPS} outputs, {self.base_units} units, and depth {self.depth}")
             try:
-                # Try to load existing model
-                if os.path.exists(self.model_out):
-                    self.logger.info(f"Loading existing model from {self.model_out}")
+                # Enable mixed precision if requested
+                if reduce_precision:
                     try:
-                        self.model = tf.keras.models.load_model(self.model_out)
-                        self.logger.info(f"Successfully loaded model from {self.model_out}")
-                    except Exception as e:
-                        self.logger.warning(f"Error loading model: {e}")
-                        self.logger.warning("Creating new model instead.")
-                        self.model = None
-                else:
-                    self.logger.info("No existing model found, creating new one.")
-                    self.model = None
-                    
-                # Create a new model if loading failed
-                if self.model is None:
-                    self.logger.info("Creating new model...")
-                    
-                    # Enable mixed precision if requested
-                    if reduce_precision:
-                        try:
-                            policy = tf.keras.mixed_precision.Policy('mixed_float16')
-                            tf.keras.mixed_precision.set_global_policy(policy)
-                            self.logger.info(f"Mixed precision enabled with policy: {policy.name}")
-                        except:
-                            self.logger.warning("Mixed precision not available, using default precision")
-
-                    # Check if GPU is available
-                    gpus = tf.config.experimental.list_physical_devices('GPU')
-                    if gpus:
-                        try:
-                            # Configure memory growth to avoid OOM errors
-                            for gpu in gpus:
-                                tf.config.experimental.set_memory_growth(gpu, True)
-                            self.logger.info(f"Configured GPU memory growth: {len(gpus)} GPUs available")
-                        except RuntimeError as e:
-                            self.logger.error(f"GPU configuration error: {e}")
-                            
-                    # Create model
-                    try:
-                        self.model = load_advanced_lstm_model(
-                            model_5m_window=self.window_5m,
-                            model_15m_window=self.window_15m,
-                            model_1h_window=self.window_1h,
-                            feature_dim=self.feature_5m,
-                            santiment_dim=self.santiment_dim,
-                            ta_dim=self.ta_dim,
-                            signal_dim=self.signal_dim,
-                            base_units=self.base_units,
-                            memory_efficient=True,
-                            gradient_accumulation=self.grad_accum,
-                            gradient_accumulation_steps=self.accum_steps,
-                            mixed_precision=self.reduce_precision
-                        )
+                        policy = tf.keras.mixed_precision.Policy('mixed_float16')
+                        tf.keras.mixed_precision.set_global_policy(policy)
+                        self.logger.info(f"Mixed precision enabled with policy: {policy.name}")
+                    except:
+                        self.logger.warning("Mixed precision not available, using default precision")
                         
-                        if self.model is None:
-                            self.logger.error("Model creation returned None")
-                            print("ERROR: Model creation returned None")
-                        else:
-                            self.logger.info(f"Model created successfully with {self.model.count_params()} parameters")
-                    except Exception as e:
-                        self.logger.error(f"Error creating model: {e}")
-                        print(f"ERROR creating model: {e}")
-                        raise
+                # Create model - add massive_model=True to enable the new architecture
+                self.model = load_advanced_lstm_model(
+                    model_5m_window=self.window_5m,
+                    model_15m_window=self.window_15m,
+                    model_1h_window=self.window_1h,
+                    feature_dim=self.feature_5m,
+                    santiment_dim=self.santiment_dim,
+                    ta_dim=self.ta_dim,
+                    signal_dim=self.signal_dim,
+                    base_units=self.base_units,
+                    depth=self.depth,
+                    memory_efficient=True,
+                    gradient_accumulation=self.grad_accum,
+                    gradient_accumulation_steps=self.accum_steps,
+                    mixed_precision=self.reduce_precision,
+                    massive_model=True  # Enable massive model architecture
+                )
+                
+                self.logger.info(f"Model created with {self.model.count_params():,} parameters")
+                # Calculate approximate model size in MB
+                model_size_mb = self.model.count_params() * 4 / (1024 * 1024)
+                self.logger.info(f"Approximate model size: {model_size_mb:.2f} MB")
+                
             except Exception as e:
                 self.logger.error(f"Failed to initialize model: {e}")
                 print(f"ERROR: Failed to initialize model: {e}")
@@ -208,245 +482,50 @@ class Trainer:
         else:
             self.logger.info("Skipping model initialization (skip_lstm=True).")
             self.model = None
-
-    def load_training_data(self):
-        """
-        Loads training data from CSV with memory optimizations
-        """
-        if not os.path.exists(self.training_csv):
-            self.logger.error(f"Training CSV not found: {self.training_csv}")
-            print(f"ERROR: Training CSV not found: {self.training_csv}")
-            return [None]*9
             
-        # Check file size
-        file_size = os.path.getsize(self.training_csv)
-        if file_size == 0:
-            self.logger.error(f"Training CSV is empty: {self.training_csv}")
-            print(f"ERROR: Training CSV is empty: {self.training_csv}")
-            return [None]*9
+        # Initialize DQN agent if not skipping RL training
+        if not skip_rl:
+            self.dqn_agent = DQNAgent(
+                state_dim=NUM_FUTURE_STEPS + 3,  # 10 signals + atr + btc_frac + eur_frac
+                batch_size=self.rl_batch_size
+            )
         else:
-            self.logger.info(f"Training CSV size: {file_size} bytes")
+            self.dqn_agent = None
 
-        all_5m = []
-        all_15m = []
-        all_1h = []
-        all_gt = []
-        all_sa = []
-        all_ta = []
-        all_ctx = []
-        all_Y = []
-        all_ts = []
-        
-        start_time = time.time()
-        
-        # Count rows first to preallocate memory
-        total_rows = 0
+    def fit_scalers(self, gen):
+        """Fit scalers on a subset of training data"""
         try:
-            with open(self.training_csv, "r", encoding="utf-8") as f:
-                reader = csv.reader(f)
-                # Skip header
-                next(reader, None)
-                for _ in reader:
-                    total_rows += 1
+            # Get first batch for fitting scalers
+            X, _ = gen[0]
+            X_5m, X_15m, X_1h, X_google, X_santiment, X_ta, X_ctx = X
             
-            if total_rows == 0:
-                self.logger.error(f"Training CSV has no data rows: {self.training_csv}")
-                print(f"ERROR: Training CSV has no data rows: {self.training_csv}")
-                return [None]*9
+            # Initialize scaler if needed
+            if self.model_scaler is None:
+                self.model_scaler = ModelScaler()
                 
-            self.logger.info(f"Found {total_rows} data rows in CSV file.")
+            # Fit all scalers
+            self.model_scaler.fit_all(
+                X_5m, X_15m, X_1h,
+                X_google, X_santiment,
+                X_ta, X_ctx
+            )
+            
+            # Save scalers
+            try:
+                self.model_scaler.save("models/scalers.pkl")
+                self.logger.info("Scalers fitted and saved to models/scalers.pkl")
+            except Exception as e:
+                self.logger.error(f"Error saving scalers: {e}")
+            
+            return True
         except Exception as e:
-            self.logger.error(f"Error reading CSV file: {e}")
-            print(f"ERROR reading CSV file: {e}")
-            return [None]*9
-        
-        # Limit to max_rows if specified
-        if self.max_rows > 0:
-            total_rows = min(total_rows, self.max_rows)
-            self.logger.info(f"Limiting to {total_rows} rows as specified.")
-            
-        # Now read the actual data
-        row_count = 0
-        error_rows = 0
-        
-        try:
-            with open(self.training_csv, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                
-                # Check required columns
-                required_cols = ["timestamp", "arr_5m", "arr_15m", "arr_1h", "arr_google_trend", 
-                              "arr_santiment", "arr_ta_63", "arr_ctx_11"]
-                missing_cols = [col for col in required_cols if col not in reader.fieldnames]
-                
-                # Check output columns
-                for i in range(1, NUM_FUTURE_STEPS+1):
-                    col_name = f"y_{i}"
-                    if col_name not in reader.fieldnames:
-                        missing_cols.append(col_name)
-                        
-                if missing_cols:
-                    self.logger.error(f"CSV missing columns: {missing_cols}")
-                    print(f"ERROR: CSV missing columns: {missing_cols}")
-                    return [None]*9
-                
-                # Process rows
-                for row_idx, row in enumerate(reader):
-                    if self.max_rows > 0 and row_count >= self.max_rows:
-                        break
+            self.logger.error(f"Error fitting scalers: {e}")
+            return False
 
-                    try:
-                        # Report progress periodically
-                        if row_count % 500 == 0:
-                            self.logger.info(f"Loading data: {row_count}/{total_rows} rows processed")
-                            # Force garbage collection
-                            gc.collect()
-                            
-                        timestamp_str = row["timestamp"]
-                        arr_5m_str = row["arr_5m"]
-                        arr_15m_str = row["arr_15m"]
-                        arr_1h_str = row["arr_1h"]
-                        arr_gt_str = row["arr_google_trend"]
-                        arr_sa_str = row["arr_santiment"]
-                        arr_ta_str = row["arr_ta_63"]
-                        arr_ctx_str = row["arr_ctx_11"]
-
-                        # Parse JSON
-                        try:
-                            arr_5m_list = json.loads(arr_5m_str)[0]
-                            arr_15m_list = json.loads(arr_15m_str)[0]
-                            arr_1h_list = json.loads(arr_1h_str)[0]
-                            arr_gt_list = json.loads(arr_gt_str)[0]
-                            arr_sa_list = json.loads(arr_sa_str)[0]
-                            arr_ta_list = json.loads(arr_ta_str)[0]
-                            arr_ctx_list = json.loads(arr_ctx_str)[0]
-                        except json.JSONDecodeError as e:
-                            self.logger.warning(f"JSON parsing error in row {row_idx+1}: {e}")
-                            error_rows += 1
-                            continue
-
-                        # Verify dimensions
-                        if len(arr_5m_list) != 241:
-                            self.logger.warning(f"Row {row_idx+1}: arr_5m has wrong dimension: {len(arr_5m_list)}")
-                            error_rows += 1
-                            continue
-                        if len(arr_15m_list) != 241:
-                            self.logger.warning(f"Row {row_idx+1}: arr_15m has wrong dimension: {len(arr_15m_list)}")
-                            error_rows += 1
-                            continue
-                        if len(arr_1h_list) != 241:
-                            self.logger.warning(f"Row {row_idx+1}: arr_1h has wrong dimension: {len(arr_1h_list)}")
-                            error_rows += 1
-                            continue
-                        if len(arr_gt_list) != 24:
-                            self.logger.warning(f"Row {row_idx+1}: arr_google_trend has wrong dimension: {len(arr_gt_list)}")
-                            error_rows += 1
-                            continue
-                        if len(arr_sa_list) != 12:
-                            self.logger.warning(f"Row {row_idx+1}: arr_santiment has wrong dimension: {len(arr_sa_list)}")
-                            error_rows += 1
-                            continue
-                        if len(arr_ta_list) != 63:
-                            self.logger.warning(f"Row {row_idx+1}: arr_ta_63 has wrong dimension: {len(arr_ta_list)}")
-                            error_rows += 1
-                            continue
-                        if len(arr_ctx_list) != 11:
-                            self.logger.warning(f"Row {row_idx+1}: arr_ctx_11 has wrong dimension: {len(arr_ctx_list)}")
-                            error_rows += 1
-                            continue
-                        
-                        # Skip rows with all zeros
-                        if sum(arr_5m_list[0]) == 0:
-                            self.logger.warning(f"Row {row_idx+1}: Skipping zero data")
-                            error_rows += 1
-                            continue
-
-                        # Parse target values
-                        y_vec = []
-                        for i in range(1, NUM_FUTURE_STEPS+1):
-                            col_name = f"y_{i}"
-                            try:
-                                val_str = row[col_name]
-                                val_f = float(val_str)  # each in [-1,1]
-                                y_vec.append(val_f)
-                            except (KeyError, ValueError) as e:
-                                self.logger.warning(f"Row {row_idx+1}: Error parsing {col_name}: {e}")
-                                error_rows += 1
-                                continue
-
-                        # Add to arrays
-                        all_5m.append(arr_5m_list)
-                        all_15m.append(arr_15m_list)
-                        all_1h.append(arr_1h_list)
-                        all_gt.append(arr_gt_list)
-                        all_sa.append(arr_sa_list)
-                        all_ta.append(arr_ta_list)
-                        all_ctx.append(arr_ctx_list)
-                        all_Y.append(y_vec)
-                        all_ts.append(timestamp_str)
-                        
-                        row_count += 1
-
-                    except Exception as e:
-                        self.logger.warning(f"Error in row {row_idx+1}: {e}")
-                        error_rows += 1
-                        continue
-        except Exception as e:
-            self.logger.error(f"Error processing CSV: {e}")
-            print(f"ERROR processing CSV: {e}")
-            import traceback
-            print(traceback.format_exc())
-            return [None]*9
-
-        if error_rows > 0:
-            self.logger.warning(f"Skipped {error_rows} rows with errors")
-            
-        # Check if we loaded any valid data
-        if row_count == 0:
-            self.logger.error("No valid data rows found in CSV")
-            print("ERROR: No valid data rows found in CSV")
-            return [None]*9
-            
-        # Convert to numpy arrays using appropriate precision
-        dtype = np.float32 if not self.reduce_precision else np.float16
-        
-        try:
-            X_5m = np.array(all_5m, dtype=dtype)
-            X_15m = np.array(all_15m, dtype=dtype)
-            X_1h = np.array(all_1h, dtype=dtype)
-            X_gt = np.array(all_gt, dtype=dtype)
-            X_sa = np.array(all_sa, dtype=dtype)
-            X_ta = np.array(all_ta, dtype=dtype)
-            X_ctx = np.array(all_ctx, dtype=dtype)
-            Y = np.array(all_Y, dtype=dtype)
-        except Exception as e:
-            self.logger.error(f"Error converting to numpy arrays: {e}")
-            print(f"ERROR converting to numpy arrays: {e}")
-            return [None]*9
-
-        # Clean up to free memory
-        del all_5m, all_15m, all_1h, all_gt, all_sa, all_ta, all_ctx, all_Y
-        gc.collect()
-
-        elapsed_time = time.time() - start_time
-        self.logger.info(
-            f"Loaded {len(X_5m)} rows in {elapsed_time:.2f}s. X_5m={X_5m.shape}, Y={Y.shape}"
-        )
-        print(f"Successfully loaded {len(X_5m)} rows in {elapsed_time:.2f}s")
-        print(f"Data shapes: X_5m={X_5m.shape}, Y={Y.shape}")
-        
-        return X_5m, X_15m, X_1h, X_gt, X_sa, X_ta, X_ctx, Y, all_ts
-
-    def split_data(self, N):
-        """
-        Split data into train/validation sets
-        """
-        train_end = int(N * self.train_ratio)
-        val_end = int(N * (self.train_ratio + self.val_ratio))
-        return train_end, val_end
-
-    def custom_gradient_accumulation_training(self, x_train, y_train, x_val=None, y_val=None):
+    def custom_gradient_accumulation_training(self, train_gen, val_gen=None):
         """
         Memory-efficient custom training function with gradient accumulation
+        optimized for massive models
         """
         best_val_loss = float('inf')
         patience_counter = 0
@@ -461,38 +540,22 @@ class Trainer:
         # Training metrics
         train_loss = tf.keras.metrics.Mean()
         train_mae = tf.keras.metrics.MeanAbsoluteError()
-        val_loss = tf.keras.metrics.Mean()
-        val_mae = tf.keras.metrics.MeanAbsoluteError()
+        
+        if val_gen:
+            val_loss = tf.keras.metrics.Mean()
+            val_mae = tf.keras.metrics.MeanAbsoluteError()
         
         # TensorBoard logging
         current_time = int(time.time())
         log_dir = f'logs_training/gradient_accum_{current_time}'
         summary_writer = tf.summary.create_file_writer(log_dir)
         
-        # Extract input components
-        X_5m_train, X_15m_train, X_1h_train, X_gt_train, X_sa_train, X_ta_train, X_ctx_train = x_train
-        
-        # Number of batches per epoch
-        train_samples = len(y_train)
-        steps_per_epoch = max(1, train_samples // self.batch_size)
-        
-        # Input validation
-        if len(y_train) != len(X_5m_train):
-            self.logger.error(f"Inconsistent data sizes: y_train={len(y_train)}, X_5m_train={len(X_5m_train)}")
-            print(f"ERROR: Inconsistent data sizes: y_train={len(y_train)}, X_5m_train={len(X_5m_train)}")
-            return
-            
-        # Prepare validation data if present
-        has_validation = (x_val is not None and y_val is not None and len(y_val) > 0)
-        if has_validation:
-            X_5m_val, X_15m_val, X_1h_val, X_gt_val, X_sa_val, X_ta_val, X_ctx_val = x_val
-            val_samples = len(y_val)
-            val_steps = max(1, val_samples // self.batch_size)
+        steps_per_epoch = len(train_gen)
         
         self.logger.info(f"Starting training with gradient accumulation")
         print(f"Starting training with gradient accumulation")
-        self.logger.info(f"Samples: {train_samples}, Steps per epoch: {steps_per_epoch}")
-        print(f"Samples: {train_samples}, Steps per epoch: {steps_per_epoch}")
+        self.logger.info(f"Steps per epoch: {steps_per_epoch}")
+        print(f"Steps per epoch: {steps_per_epoch}")
         self.logger.info(f"Batch size: {self.batch_size}, Accumulation steps: {self.accum_steps}")
         print(f"Batch size: {self.batch_size}, Accumulation steps: {self.accum_steps}")
         
@@ -501,57 +564,84 @@ class Trainer:
             self.logger.info(f"Epoch {epoch+1}/{self.epochs}")
             print(f"Epoch {epoch+1}/{self.epochs}")
             
-            # Reset metrics
+            # Reset metrics - using try/except for TF version compatibility
             try:
                 train_loss.reset_states()
                 train_mae.reset_states()
-            except:
-                # Fallback for older TF versions
-                train_loss.reset()
-                train_mae.reset()
+            except AttributeError:
+                try:
+                    # TF 2.18+ uses reset() instead of reset_states()
+                    train_loss.reset()
+                    train_mae.reset()
+                except AttributeError:
+                    # Last resort: create new metric instances
+                    train_loss = tf.keras.metrics.Mean()
+                    train_mae = tf.keras.metrics.MeanAbsoluteError()
             
-            # Manual batching and gradient accumulation
+            # Accumulated gradients
             accumulated_gradients = None
             accumulation_count = 0
             
-            # Process in batches
+            # Process batches
             for step in range(steps_per_epoch):
                 try:
-                    # Calculate batch indices
-                    start_idx = step * self.batch_size
-                    end_idx = min(start_idx + self.batch_size, train_samples)
+                    step_start_time = time.time()
+                    
+                    # Get batch
+                    X_batch, y_batch = train_gen[step]
                     
                     # Skip empty batches
-                    if start_idx >= end_idx:
+                    if X_batch[0].shape[0] == 0:
                         continue
                     
-                    # Prepare batch data - always use float32 for stability
-                    X_5m_batch = tf.convert_to_tensor(X_5m_train[start_idx:end_idx], dtype=tf.float32)
-                    X_15m_batch = tf.convert_to_tensor(X_15m_train[start_idx:end_idx], dtype=tf.float32)
-                    X_1h_batch = tf.convert_to_tensor(X_1h_train[start_idx:end_idx], dtype=tf.float32)
-                    X_gt_batch = tf.convert_to_tensor(X_gt_train[start_idx:end_idx], dtype=tf.float32)
-                    X_sa_batch = tf.convert_to_tensor(X_sa_train[start_idx:end_idx], dtype=tf.float32)
-                    X_ta_batch = tf.convert_to_tensor(X_ta_train[start_idx:end_idx], dtype=tf.float32)
-                    X_ctx_batch = tf.convert_to_tensor(X_ctx_train[start_idx:end_idx], dtype=tf.float32)
-                    y_batch = tf.convert_to_tensor(y_train[start_idx:end_idx], dtype=tf.float32)
+                    # Convert to tensors
+                    X_5m_batch = tf.convert_to_tensor(X_batch[0], dtype=tf.float32)
+                    X_15m_batch = tf.convert_to_tensor(X_batch[1], dtype=tf.float32)
+                    X_1h_batch = tf.convert_to_tensor(X_batch[2], dtype=tf.float32)
+                    X_gt_batch = tf.convert_to_tensor(X_batch[3], dtype=tf.float32)
+                    X_sa_batch = tf.convert_to_tensor(X_batch[4], dtype=tf.float32)
+                    X_ta_batch = tf.convert_to_tensor(X_batch[5], dtype=tf.float32)
+                    X_ctx_batch = tf.convert_to_tensor(X_batch[6], dtype=tf.float32)
+                    y_batch = tf.convert_to_tensor(y_batch, dtype=tf.float32)
+                    
+                    data_prep_time = time.time() - step_start_time
                     
                     # Initialize accumulated gradients if needed
                     if accumulated_gradients is None:
                         accumulated_gradients = [tf.zeros_like(var) for var in self.model.trainable_variables]
                     
                     # Forward pass and calculate gradients
+                    forward_start = time.time()
                     with tf.GradientTape() as tape:
                         y_pred = self.model(
                             [X_5m_batch, X_15m_batch, X_1h_batch, X_gt_batch, X_sa_batch, X_ta_batch, X_ctx_batch], 
                             training=True
                         )
                         batch_loss = loss_fn(y_batch, y_pred)
+                    forward_time = time.time() - forward_start
                     
                     # Calculate and accumulate gradients
+                    gradient_start = time.time()
                     gradients = tape.gradient(batch_loss, self.model.trainable_variables)
+                    
+                    # Check for NaN gradients and clip them
+                    has_nans = False
+                    for i, grad in enumerate(gradients):
+                        if grad is not None:
+                            if tf.reduce_any(tf.math.is_nan(grad)):
+                                has_nans = True
+                                gradients[i] = tf.zeros_like(grad)
+                            else:
+                                # Clip gradients to prevent explosion
+                                gradients[i] = tf.clip_by_norm(grad, 1.0)
+                    
+                    if has_nans:
+                        self.logger.warning(f"NaN gradients detected in step {step+1}, zeroing them out")
+                    
                     for i, grad in enumerate(gradients):
                         if grad is not None:
                             accumulated_gradients[i] += grad
+                    gradient_time = time.time() - gradient_start
                     
                     # Update metrics
                     train_loss.update_state(batch_loss)
@@ -573,7 +663,9 @@ class Trainer:
                                 accumulated_gradients[i] = accumulated_gradients[i] / accumulation_count
                         
                         # Apply gradients
+                        apply_start = time.time()
                         optimizer.apply_gradients(zip(accumulated_gradients, self.model.trainable_variables))
+                        apply_time = time.time() - apply_start
                         
                         # Reset accumulation
                         accumulated_gradients = [tf.zeros_like(var) for var in self.model.trainable_variables]
@@ -582,10 +674,17 @@ class Trainer:
                         # Force garbage collection
                         gc.collect()
                     
-                    # Log progress
+                    # Calculate step time
+                    step_time = time.time() - step_start_time
+                    
+                    # Log timing details periodically
                     if (step + 1) % 10 == 0:
-                        self.logger.info(f"  Step {step+1}/{steps_per_epoch} - Loss: {train_loss.result():.4f}")
-                        print(f"  Step {step+1}/{steps_per_epoch} - Loss: {train_loss.result():.4f}")
+                        self.logger.info(
+                            f"  Step {step+1}/{steps_per_epoch} - "
+                            f"Loss: {train_loss.result():.4f} - "
+                            f"Time: {step_time:.2f}s (data: {data_prep_time:.2f}s, "
+                            f"forward: {forward_time:.2f}s, grad: {gradient_time:.2f}s)"
+                        )
                 except Exception as e:
                     self.logger.error(f"Error in training step {step+1}: {e}")
                     print(f"Error in training step {step+1}: {e}")
@@ -594,50 +693,61 @@ class Trainer:
                     continue
             
             # Validation if available
-            if has_validation:
+            if val_gen:
                 try:
                     # Reset validation metrics
                     try:
                         val_loss.reset_states()
                         val_mae.reset_states()
-                    except:
-                        val_loss.reset()
-                        val_mae.reset()
+                    except AttributeError:
+                        try:
+                            # TF 2.18+ uses reset() instead of reset_states()
+                            val_loss.reset()
+                            val_mae.reset()
+                        except AttributeError:
+                            # Last resort: create new metric instances
+                            val_loss = tf.keras.metrics.Mean()
+                            val_mae = tf.keras.metrics.MeanAbsoluteError()
                     
-                    # Process validation in batches
-                    for val_step in range(val_steps):
-                        start_idx = val_step * self.batch_size
-                        end_idx = min(start_idx + self.batch_size, val_samples)
+                    # Process validation batches
+                    self.logger.info(f"Running validation ({len(val_gen)} batches)...")
+                    for val_step in range(len(val_gen)):
+                        # Get validation batch
+                        X_val_batch, y_val_batch = val_gen[val_step]
                         
                         # Skip empty batches
-                        if start_idx >= end_idx:
+                        if X_val_batch[0].shape[0] == 0:
                             continue
                             
-                        # Prepare validation batch
-                        X_5m_val_batch = tf.convert_to_tensor(X_5m_val[start_idx:end_idx], dtype=tf.float32)
-                        X_15m_val_batch = tf.convert_to_tensor(X_15m_val[start_idx:end_idx], dtype=tf.float32)
-                        X_1h_val_batch = tf.convert_to_tensor(X_1h_val[start_idx:end_idx], dtype=tf.float32)
-                        X_gt_val_batch = tf.convert_to_tensor(X_gt_val[start_idx:end_idx], dtype=tf.float32)
-                        X_sa_val_batch = tf.convert_to_tensor(X_sa_val[start_idx:end_idx], dtype=tf.float32)
-                        X_ta_val_batch = tf.convert_to_tensor(X_ta_val[start_idx:end_idx], dtype=tf.float32)
-                        X_ctx_val_batch = tf.convert_to_tensor(X_ctx_val[start_idx:end_idx], dtype=tf.float32)
-                        y_val_batch = tf.convert_to_tensor(y_val[start_idx:end_idx], dtype=tf.float32)
+                        # Convert to tensors
+                        X_5m_val = tf.convert_to_tensor(X_val_batch[0], dtype=tf.float32)
+                        X_15m_val = tf.convert_to_tensor(X_val_batch[1], dtype=tf.float32)
+                        X_1h_val = tf.convert_to_tensor(X_val_batch[2], dtype=tf.float32)
+                        X_gt_val = tf.convert_to_tensor(X_val_batch[3], dtype=tf.float32)
+                        X_sa_val = tf.convert_to_tensor(X_val_batch[4], dtype=tf.float32)
+                        X_ta_val = tf.convert_to_tensor(X_val_batch[5], dtype=tf.float32)
+                        X_ctx_val = tf.convert_to_tensor(X_val_batch[6], dtype=tf.float32)
+                        y_val = tf.convert_to_tensor(y_val_batch, dtype=tf.float32)
                         
                         # Forward pass
                         y_pred = self.model(
-                            [X_5m_val_batch, X_15m_val_batch, X_1h_val_batch, X_gt_val_batch, 
-                            X_sa_val_batch, X_ta_val_batch, X_ctx_val_batch], 
+                            [X_5m_val, X_15m_val, X_1h_val, X_gt_val, 
+                            X_sa_val, X_ta_val, X_ctx_val], 
                             training=False
                         )
                         
                         # Calculate loss and update metrics
-                        val_batch_loss = loss_fn(y_val_batch, y_pred)
+                        val_batch_loss = loss_fn(y_val, y_pred)
                         val_loss.update_state(val_batch_loss)
-                        val_mae.update_state(y_val_batch, y_pred)
+                        val_mae.update_state(y_val, y_pred)
                         
                         # Free memory
-                        del X_5m_val_batch, X_15m_val_batch, X_1h_val_batch, X_gt_val_batch
-                        del X_sa_val_batch, X_ta_val_batch, X_ctx_val_batch, y_val_batch, y_pred
+                        del X_5m_val, X_15m_val, X_1h_val, X_gt_val
+                        del X_sa_val, X_ta_val, X_ctx_val, y_val, y_pred
+                        
+                        # Log progress
+                        if (val_step + 1) % 10 == 0:
+                            self.logger.info(f"  Val Step {val_step+1}/{len(val_gen)}")
                     
                     # Log metrics
                     with summary_writer.as_default():
@@ -685,11 +795,15 @@ class Trainer:
                     tf.summary.scalar('train_loss', train_loss.result(), step=epoch)
                     tf.summary.scalar('train_mae', train_mae.result(), step=epoch)
                 
-                # Save periodically
-                if (epoch + 1) % 10 == 0 or epoch == self.epochs - 1:
-                    self.model.save(f"{self.model_out.replace('.keras', '')}_epoch{epoch+1}.keras")
-                    self.logger.info(f"  Saved checkpoint at epoch {epoch+1}")
-                    print(f"  Saved checkpoint at epoch {epoch+1}")
+                # Save checkpoint models periodically (every 5 epochs for massive models)
+                if (epoch + 1) % 5 == 0 or epoch == self.epochs - 1:
+                    # Use checkpoint directory to save multiple versions
+                    checkpoint_dir = f"models/checkpoints/epoch_{epoch+1}"
+                    os.makedirs(checkpoint_dir, exist_ok=True)
+                    checkpoint_path = os.path.join(checkpoint_dir, "model.keras")
+                    self.model.save(checkpoint_path)
+                    self.logger.info(f"  Saved checkpoint at epoch {epoch+1} to {checkpoint_path}")
+                    print(f"  Saved checkpoint at epoch {epoch+1} to {checkpoint_path}")
                     
                 # Log epoch stats
                 epoch_time = time.time() - epoch_start_time
@@ -706,17 +820,25 @@ class Trainer:
             gc.collect()
         
         # Save final model if not already saved
-        if not has_validation:
-            self.model.save(self.model_out)
-            self.logger.info(f"Saved final model to {self.model_out}")
-            print(f"Saved final model to {self.model_out}")
+        if not val_gen or patience_counter < self.early_stop_patience:
+            final_path = self.model_out
+            self.model.save(final_path)
+            self.logger.info(f"Saved final model to {final_path}")
+            print(f"Saved final model to {final_path}")
+            
+            # Also save to a timestamp-based file to keep a record
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            timestamp_path = f"models/advanced_lstm_model_{timestamp}.keras"
+            self.model.save(timestamp_path)
+            self.logger.info(f"Saved timestamped model to {timestamp_path}")
+            print(f"Saved timestamped model to {timestamp_path}")
 
     def train_lstm(self):
         """
-        Train the multi-output LSTM with memory optimizations
+        Train the multi-output LSTM with optimizations for massive models
         """
-        self.logger.info("Starting LSTM training...")
-        print("Starting LSTM training...")
+        self.logger.info("Starting MASSIVE LSTM training...")
+        print("Starting MASSIVE LSTM training...")
         
         # Validate training data first
         if not os.path.exists(self.training_csv):
@@ -729,404 +851,177 @@ class Trainer:
             print(f"ERROR: Training data file is empty: {self.training_csv}")
             return
         
-        # Load the data
-        data = self.load_training_data()
-        if not data or data[0] is None:
-            self.logger.error("No valid training data found => abort training.")
-            print("ERROR: No valid training data found => abort training.")
-            return
-
-        (X_5m, X_15m, X_1h,
-         X_gt, X_sa,
-         X_ta, X_ctx,
-         Y, all_ts) = data
-
-        N = len(Y)
-        if N < 10:
-            self.logger.error("Too few samples => abort training.")
-            print("ERROR: Too few samples => abort training.")
-            return
+        # Create data generators with optimized batch size and caching
+        train_gen = MemoryEfficientGenerator(
+            csv_file=self.training_csv,
+            batch_size=self.batch_size,
+            shuffle=True,
+            validation=False,
+            val_split=self.val_ratio,
+            max_rows=self.max_rows,
+            scaler=None,  # Don't apply scaling yet
+            cache_size=self.cache_batches
+        )
         
-        # No need to shuffle - chronological order is important
-        self.logger.info(f"Total samples loaded: {N}")
-        print(f"Total samples loaded: {N}")
-
-        # Split into train/validation sets
-        train_end, val_end = self.split_data(N)
-        X_5m_train, X_5m_val   = X_5m[:train_end], X_5m[train_end:val_end]
-        X_15m_train,X_15m_val  = X_15m[:train_end],X_15m[train_end:val_end]
-        X_1h_train, X_1h_val   = X_1h[:train_end], X_1h[train_end:val_end]
-        X_gt_train, X_gt_val   = X_gt[:train_end], X_gt[train_end:val_end]
-        X_sa_train, X_sa_val   = X_sa[:train_end], X_sa[train_end:val_end]
-        X_ta_train, X_ta_val   = X_ta[:train_end], X_ta[train_end:val_end]
-        X_ctx_train,X_ctx_val  = X_ctx[:train_end],X_ctx[train_end:val_end]
-        Y_train,     Y_val     = Y[:train_end],    Y[train_end:val_end]
-        ts_train = all_ts[:train_end]
+        val_gen = MemoryEfficientGenerator(
+            csv_file=self.training_csv,
+            batch_size=self.batch_size,
+            shuffle=False,
+            validation=True,
+            val_split=self.val_ratio,
+            max_rows=self.max_rows,
+            scaler=None,  # Don't apply scaling yet
+            cache_size=self.cache_batches
+        )
         
-        # Free memory
-        del X_5m, X_15m, X_1h, X_gt, X_sa, X_ta, X_ctx, Y
-        gc.collect()
-
-        self.logger.info(f"Train={len(Y_train)}, Val={len(Y_val)}")
-        print(f"Train={len(Y_train)}, Val={len(Y_val)}")
-
-        # DEBUG: row_train_start, row_train_end
-        if len(ts_train) > 0:
-            row_train_start = ts_train[0]
-            row_train_end   = ts_train[-1]
-            self.logger.info(f"Train slice => start={row_train_start}, end={row_train_end}")
-            print(f"Train slice => start={row_train_start}, end={row_train_end}")
-
-        # Load/fallback scalers
-        try:
-            model_scaler = ModelScaler.load("models/scalers.pkl")
-            self.logger.info("Loaded scalers from models/scalers.pkl.")
-            print("Loaded scalers from models/scalers.pkl.")
-        except Exception as e:
-            self.logger.warning(f"No scalers found: {e} => creating new ModelScaler.")
-            print(f"No scalers found: {e} => creating new ModelScaler.")
-            model_scaler = ModelScaler()
-
-        if self.apply_scaling:
-            self.logger.info("Fitting and applying scalers...")
-            print("Fitting and applying scalers...")
-            try:
-                model_scaler.fit_all(
-                    X_5m_train, X_15m_train, X_1h_train,
-                    X_gt_train, X_sa_train,
-                    X_ta_train, X_ctx_train
-                )
-                print("Successfully fitted scalers.")
-            except Exception as e:
-                self.logger.warning(f"Error during scaler fitting: {e}. Proceeding without scaling.")
-                print(f"Error during scaler fitting: {e}. Proceeding without scaling.")
-                self.apply_scaling = False
-        else:
-            self.logger.info("Scaling disabled => pass-thru transforms.")
-            print("Scaling disabled => pass-thru transforms.")
-
-        # Transform data if scaling is enabled
-        if self.apply_scaling:
-            try:
-                (X_5m_train, X_15m_train, X_1h_train,
-                 X_gt_train, X_sa_train,
-                 X_ta_train, X_ctx_train) = prepare_for_model_inputs(
-                    X_5m_train, X_15m_train, X_1h_train,
-                    X_gt_train, X_sa_train, X_ta_train, X_ctx_train,
-                    model_scaler
-                )
-                print("Successfully transformed training data.")
-                
-                if len(Y_val) > 0:
-                    (X_5m_val, X_15m_val, X_1h_val,
-                     X_gt_val, X_sa_val,
-                     X_ta_val, X_ctx_val) = prepare_for_model_inputs(
-                        X_5m_val, X_15m_val, X_1h_val,
-                        X_gt_val, X_sa_val, X_ta_val, X_ctx_val,
-                        model_scaler
-                    )
-                    print("Successfully transformed validation data.")
-            except Exception as e:
-                self.logger.warning(f"Error during data transformation: {e}. Using original data.")
-                print(f"Error during data transformation: {e}. Using original data.")
-
-        self.logger.info(f"Fitting model => output dim={NUM_FUTURE_STEPS}, epochs={self.epochs}, batch={self.batch_size}")
-        print(f"Fitting model => output dim={NUM_FUTURE_STEPS}, epochs={self.epochs}, batch={self.batch_size}")
-        self.logger.info(f"Chronological split => train={len(Y_train)}, val={len(Y_val)}")
-        print(f"Chronological split => train={len(Y_train)}, val={len(Y_val)}")
-
-        # Use our memory-efficient custom training function
-        if self.grad_accum:
-            self.logger.info("Using gradient accumulation for training")
-            print("Using gradient accumulation for training")
-            self.custom_gradient_accumulation_training(
-                x_train=[
-                    X_5m_train, X_15m_train, X_1h_train,
-                    X_gt_train, X_sa_train, X_ta_train, X_ctx_train
-                ],
-                y_train=Y_train,
-                x_val=[
-                    X_5m_val, X_15m_val, X_1h_val,
-                    X_gt_val, X_sa_val, X_ta_val, X_ctx_val
-                ] if len(Y_val) > 0 else None,
-                y_val=Y_val if len(Y_val) > 0 else None
-            )
-        else:
-            # Standard Keras training with callbacks
-            self.logger.info("Using standard TensorFlow training")
-            print("Using standard TensorFlow training")
+        # Fit scalers if needed
+        if self.apply_scaling and (self.model_scaler is None or not hasattr(self.model_scaler, 'fitted') or not self.model_scaler.fitted):
+            self.logger.info("Fitting scalers on training data...")
+            print("Fitting scalers on training data...")
+            self.fit_scalers(train_gen)
             
-            def create_callbacks():
-                # Early stopping
-                early_stop = tf.keras.callbacks.EarlyStopping(
-                    monitor='val_loss', 
-                    patience=self.early_stop_patience, 
-                    restore_best_weights=True,
-                    verbose=1
-                )
-                
-                # Learning rate reduction on plateau
-                reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
-                    monitor='val_loss',
-                    factor=0.5,         # Reduce by half
-                    patience=10,
-                    min_lr=1e-7,
-                    verbose=1
-                )
-                
-                # Checkpoint best models
-                checkpoint = tf.keras.callbacks.ModelCheckpoint(
-                    f"models/checkpoint-{int(time.time())}-ep{{epoch:03d}}_val{{val_loss:.4f}}.keras",
-                    monitor='val_loss',
-                    save_best_only=True,
-                    verbose=1
-                )
-                
-                # Memory-efficient TensorBoard logging
-                tensorboard = tf.keras.callbacks.TensorBoard(
-                    log_dir=f"logs_training/fit_{int(time.time())}",
-                    histogram_freq=0,  # Disable histogram to save memory
-                    update_freq='epoch'
-                )
-                
-                # Free memory at the end of each epoch
-                class MemoryCleanupCallback(tf.keras.callbacks.Callback):
-                    def on_epoch_end(self, epoch, logs=None):
-                        gc.collect()
-                
-                return [early_stop, reduce_lr, checkpoint, tensorboard, MemoryCleanupCallback()]
+        # Update generators to use scalers
+        train_gen.scaler = self.model_scaler
+        val_gen.scaler = self.model_scaler
+        
+        self.logger.info(f"Training with {len(train_gen)} batches, validation with {len(val_gen)} batches")
+        print(f"Training with {len(train_gen)} batches, validation with {len(val_gen)} batches")
 
-            try:
-                self.logger.info("Starting model.fit...")
-                print("Starting model.fit...")
-                
-                validation_data = (
-                    [
-                        X_5m_val, X_15m_val, X_1h_val,
-                        X_gt_val, X_sa_val, X_ta_val, X_ctx_val
-                    ],
-                    Y_val
-                ) if len(Y_val) > 0 else None
-                
-                history = self.model.fit(
-                    x=[
-                        X_5m_train, X_15m_train, X_1h_train,
-                        X_gt_train, X_sa_train, X_ta_train, X_ctx_train
-                    ],
-                    y=Y_train,
-                    validation_data=validation_data,
-                    epochs=self.epochs,
-                    batch_size=self.batch_size,
-                    callbacks=create_callbacks(),
-                    verbose=1,
-                    shuffle=False
-                )
-                
-                self.logger.info("Model training completed successfully")
-                print("Model training completed successfully")
-                
-            except Exception as e:
-                self.logger.error(f"Error in model.fit: {e}")
-                print(f"ERROR in model.fit: {e}")
-                import traceback
-                print(traceback.format_exc())
+        # Create checkpoint directory
+        os.makedirs("models/checkpoints", exist_ok=True)
 
-    def train_rl_offline(
-        self,
-        rl_csv: str,
-        rl_out: str = "models/rl_DQNAgent.weights.h5",
-        rl_epochs: int = 5,
-        rl_batches: int = 500,
-        state_dim: int = NUM_FUTURE_STEPS + 3
-    ):
-        """
-        Offline RL training with memory optimizations
-        """
-        if not os.path.exists(rl_csv):
-            self.logger.error(f"No RL CSV found => {rl_csv}")
-            print(f"ERROR: No RL CSV found => {rl_csv}")
+        # Train model with gradient accumulation - always use this for massive models
+        self.logger.info("Using advanced gradient accumulation for massive model training")
+        print("Using advanced gradient accumulation for massive model training")
+        self.custom_gradient_accumulation_training(train_gen, val_gen)
+
+    def train_rl(self):
+        """Train the RL agent on offline transitions"""
+        self.logger.info("Starting RL training...")
+        print("Starting RL training...")
+        
+        # Check if transitions file exists
+        if not os.path.exists(self.rl_transitions_csv):
+            self.logger.error(f"RL transitions file not found: {self.rl_transitions_csv}")
+            print(f"ERROR: RL transitions file not found: {self.rl_transitions_csv}")
             return
             
-        self.logger.info(f"Starting offline RL training with {rl_csv}")
-        print(f"Starting offline RL training with {rl_csv}")
-
-        transitions = []
-        failed_rows = 0
-        try:
-            with open(rl_csv, "r", encoding="utf-8") as f:
-                # Check file size
-                if os.path.getsize(rl_csv) == 0:
-                    self.logger.error(f"RL CSV is empty: {rl_csv}")
-                    print(f"ERROR: RL CSV is empty: {rl_csv}")
-                    return
+        # Load transitions
+        transitions = self._load_rl_transitions()
+        
+        if not transitions:
+            self.logger.error("No valid RL transitions found => abort RL training")
+            print("ERROR: No valid RL transitions found => abort RL training")
+            return
+            
+        self.logger.info(f"Loaded {len(transitions)} RL transitions")
+        print(f"Loaded {len(transitions)} RL transitions")
+        
+        # Store transitions in agent memory
+        for state, action, reward, next_state, done in transitions:
+            self.dqn_agent.store_transition(state, action, reward, next_state, done)
+            
+        # Train agent
+        self.logger.info(f"Training agent for {self.rl_epochs} epochs...")
+        print(f"Training agent for {self.rl_epochs} epochs...")
+        
+        for epoch in range(self.rl_epochs):
+            epoch_losses = []
+            steps_per_epoch = min(len(transitions) // self.rl_batch_size * 5, 1000)
+            
+            for step in range(steps_per_epoch):
+                loss = self.dqn_agent.train_step()
+                if loss is not None:
+                    epoch_losses.append(loss)
+                
+                # Log progress
+                if (step + 1) % 100 == 0:
+                    avg_recent_loss = np.mean(epoch_losses[-100:]) if len(epoch_losses) >= 100 else np.mean(epoch_losses)
+                    self.logger.info(f"  Step {step+1}/{steps_per_epoch} - Avg Recent Loss: {avg_recent_loss:.6f}")
                     
+            avg_loss = np.mean(epoch_losses) if epoch_losses else 0
+            
+            self.logger.info(f"Epoch {epoch+1}/{self.rl_epochs} - Avg Loss: {avg_loss:.6f} - Epsilon: {self.dqn_agent.epsilon:.4f}")
+            print(f"Epoch {epoch+1}/{self.rl_epochs} - Avg Loss: {avg_loss:.6f} - Epsilon: {self.dqn_agent.epsilon:.4f}")
+            
+            # Save checkpoint after each epoch
+            if (epoch + 1) % 2 == 0 or epoch == self.rl_epochs - 1:
+                checkpoint_path = f"models/rl_DQNAgent_epoch{epoch+1}.weights.h5"
+                self.dqn_agent.save(checkpoint_path)
+                self.logger.info(f"RL agent checkpoint saved to {checkpoint_path}")
+            
+        # Save final agent
+        self.dqn_agent.save(self.rl_model_out)
+        self.logger.info(f"RL agent saved to {self.rl_model_out}")
+        print(f"RL agent saved to {self.rl_model_out}")
+        
+    def _load_rl_transitions(self):
+        """Load RL transitions from CSV file with advanced progress reporting for large files"""
+        transitions = []
+        error_count = 0
+        
+        try:
+            # First, count number of rows (without parsing)
+            total_rows = 0
+            with open(self.rl_transitions_csv, 'r') as f:
+                for _ in f:
+                    total_rows += 1
+            
+            # Skip header row
+            total_rows -= 1
+            
+            self.logger.info(f"Found {total_rows} rows in RL transitions file")
+            print(f"Found {total_rows} rows in RL transitions file")
+            
+            # Now parse with progress reporting
+            with open(self.rl_transitions_csv, 'r') as f:
                 reader = csv.DictReader(f)
                 
-                # Check required columns
-                required_cols = ["old_state", "action", "reward", "new_state", "done"]
-                missing_cols = [col for col in required_cols if col not in reader.fieldnames]
-                if missing_cols:
-                    self.logger.error(f"RL CSV missing columns: {missing_cols}")
-                    print(f"ERROR: RL CSV missing columns: {missing_cols}")
-                    return
-                    
-                total_rows = sum(1 for _ in reader)
-                if total_rows == 0:
-                    self.logger.error(f"RL CSV has no data rows: {rl_csv}")
-                    print(f"ERROR: RL CSV has no data rows: {rl_csv}")
-                    return
-                
-                # Return to start of file and skip header
-                f.seek(0)
-                next(csv.reader(f))
-                
-                row_count = 0
-                for row in csv.DictReader(f):
+                for i, row in enumerate(reader, 1):
                     try:
-                        old_state_str = row["old_state"]
-                        action_str    = row["action"]
-                        reward_val    = float(row["reward"])
-                        new_state_str = row["new_state"]
-                        done_val      = row["done"].strip()
-
-                        try:
-                            old_st = np.array(json.loads(old_state_str), dtype=np.float32)
-                            new_st = np.array(json.loads(new_state_str), dtype=np.float32)
-                        except json.JSONDecodeError as e:
-                            failed_rows += 1
-                            self.logger.warning(f"JSON error in RL CSV row {row_count+1}: {e}")
-                            continue
-
-                        done_flag = (done_val.lower() in ["1", "true"])
-
-                        # Verify dimensions
-                        if old_st.shape[0] != state_dim: 
-                            failed_rows += 1
-                            self.logger.warning(f"RL CSV row {row_count+1}: Invalid old_state dimension {old_st.shape}")
-                            continue
-                        if new_st.shape[0] != state_dim:
-                            failed_rows += 1
-                            self.logger.warning(f"RL CSV row {row_count+1}: Invalid new_state dimension {new_st.shape}")
-                            continue
-                        if action_str not in ACTIONS:
-                            failed_rows += 1
-                            self.logger.warning(f"RL CSV row {row_count+1}: Invalid action {action_str}")
-                            continue
-
-                        transitions.append((old_st, action_str, reward_val, new_st, done_flag))
-                        row_count += 1
+                        # Parse fields
+                        old_state = np.array(json.loads(row['old_state']), dtype=np.float32)
+                        action = row['action']
+                        reward = float(row['reward'])
+                        new_state = np.array(json.loads(row['new_state']), dtype=np.float32)
+                        done = row['done'].lower() in ['1', 'true', 't', 'yes', 'y']
                         
-                        # Progress reporting
-                        if row_count % 1000 == 0:
-                            self.logger.info(f"Loading RL data: {row_count}/{total_rows} rows processed")
+                        # Validate dimensions
+                        if old_state.shape[0] != NUM_FUTURE_STEPS + 3 or new_state.shape[0] != NUM_FUTURE_STEPS + 3:
+                            error_count += 1
+                            continue
                             
+                        # Validate action
+                        if action not in ACTIONS:
+                            error_count += 1
+                            continue
+                            
+                        # Add to transitions
+                        transitions.append((old_state, action, reward, new_state, done))
+                        
+                        # Report progress
+                        if i % 1000 == 0 or i == total_rows:
+                            self.logger.info(f"Loaded {i}/{total_rows} transitions ({i/total_rows*100:.1f}%)")
+                        
                     except Exception as e:
-                        failed_rows += 1
-                        self.logger.debug(f"Error parsing RL row: {e}")
-                        continue
+                        error_count += 1
+                        if error_count < 10:  # Log only first few errors
+                            self.logger.error(f"Error parsing transition {i}: {e}")
         except Exception as e:
-            self.logger.error(f"Error reading RL CSV: {e}")
-            print(f"ERROR reading RL CSV: {e}")
-            import traceback
-            print(traceback.format_exc())
-            return
-
-        self.logger.warning(f"RL parse => skipped {failed_rows} invalid rows.")
-        print(f"RL parse => skipped {failed_rows} invalid rows.")
-        
-        if len(transitions) < 10:
-            self.logger.error("Too few RL transitions => abort RL training.")
-            print("ERROR: Too few RL transitions => abort RL training.")
-            return
-
-        self.logger.info(f"Loaded {len(transitions)} RL transitions from {rl_csv}.")
-        print(f"Loaded {len(transitions)} RL transitions from {rl_csv}.")
-
-        # Initialize DQN with compatible parameters
-        try:
-            self.logger.info("Initializing DQN agent...")
-            print("Initializing DQN agent...")
+            self.logger.error(f"Error reading RL transitions file: {e}")
             
-            dqn = DQNAgent(
-                state_dim=state_dim,
-                gamma=0.99,
-                lr=0.001,
-                batch_size=64,
-                max_memory=len(transitions)+1,
-                epsilon_start=0.0,
-                epsilon_min=0.0,
-                epsilon_decay=1.0,
-                update_target_steps=100
-            )
-
-            # Store transitions
-            self.logger.info("Storing transitions in DQN memory...")
-            print("Storing transitions in DQN memory...")
+        if error_count > 0:
+            self.logger.warning(f"Skipped {error_count} invalid transitions")
             
-            for i, (s, a, r, s2, d) in enumerate(transitions):
-                dqn.store_transition(s, a, r, s2, d)
-                if i % 1000 == 0:
-                    self.logger.info(f"Stored {i}/{len(transitions)} transitions")
+        return transitions
 
-            # Offline training with progress tracking
-            self.logger.info(f"Starting DQN training for {rl_epochs} epochs...")
-            print(f"Starting DQN training for {rl_epochs} epochs...")
-            
-            for ep in range(rl_epochs):
-                self.logger.info(f"[RL] Epoch {ep+1}/{rl_epochs}")
-                print(f"[RL] Epoch {ep+1}/{rl_epochs}")
-                epoch_losses = []
-                
-                for b in range(rl_batches):
-                    loss = dqn.train_step()
-                    if loss is not None:
-                        epoch_losses.append(loss)
-                    
-                    if (b+1) % 100 == 0:
-                        avg_loss = np.mean(epoch_losses[-100:]) if epoch_losses else 0
-                        self.logger.info(f"  Batch {b+1}/{rl_batches} - Average loss: {avg_loss:.6f}")
-                        print(f"  Batch {b+1}/{rl_batches} - Average loss: {avg_loss:.6f}")
-                
-                avg_epoch_loss = np.mean(epoch_losses) if epoch_losses else 0
-                self.logger.info(f"  Epoch {ep+1} complete - Average loss: {avg_epoch_loss:.6f}")
-                print(f"  Epoch {ep+1} complete - Average loss: {avg_epoch_loss:.6f}")
-                
-                # Save model after each epoch
-                dqn.save()
-                self.logger.info(f"  Saved DQN weights at epoch {ep+1}")
-                print(f"  Saved DQN weights at epoch {ep+1}")
-
-            # Final save
-            try:
-                dqn.save()
-                self.logger.info(f"RL weights saved => {rl_out}")
-                print(f"RL weights saved => {rl_out}")
-            except Exception as e:
-                self.logger.error(f"Error saving RL => {e}")
-                print(f"Error saving RL => {e}")
-                
-        except Exception as e:
-            self.logger.error(f"Error in RL training: {e}")
-            print(f"ERROR in RL training: {e}")
-            import traceback
-            print(traceback.format_exc())
-
-    def run(self, rl_csv=None, rl_out=None, rl_epochs=5, rl_batches=500):
-        """
-        Main entry point
-        """
-        print("\nStarting the training run...")
+    def run(self):
+        """Run the training pipeline"""
+        self.logger.info("=" * 80)
+        self.logger.info("STARTING TRAINING PIPELINE FOR MASSIVE MODEL")
+        self.logger.info("=" * 80)
         
-        # Final GPU setup
-        gpus = tf.config.experimental.list_physical_devices('GPU')
-        if gpus:
-            for gpu in gpus:
-                try:
-                    tf.config.experimental.set_memory_growth(gpu, True)
-                    self.logger.info(f"Memory growth enabled for GPU {gpu}")
-                except RuntimeError as e:
-                    self.logger.warning(f"Error setting GPU memory growth: {e}")
-        
+        # Train LSTM model
         if not self.skip_lstm:
             try:
                 self.logger.info("=== Starting LSTM Training ===")
@@ -1145,16 +1040,12 @@ class Trainer:
             self.logger.info("Skipping LSTM training.")
             print("Skipping LSTM training.")
 
-        if rl_csv and os.path.exists(rl_csv):
+        # Train RL agent
+        if not self.skip_rl:
             try:
                 self.logger.info("=== Starting RL Training ===")
                 print("=== Starting RL Training ===")
-                self.train_rl_offline(
-                    rl_csv=rl_csv,
-                    rl_out=rl_out,
-                    rl_epochs=rl_epochs,
-                    rl_batches=rl_batches
-                )
+                self.train_rl()
                 self.logger.info("=== RL Training Complete ===")
                 print("=== RL Training Complete ===")
             except Exception as e:
@@ -1165,114 +1056,116 @@ class Trainer:
                 self.logger.error(traceback_str)
                 print(traceback_str)
         else:
-            if rl_csv:
-                self.logger.info(f"RL CSV not found => {rl_csv}")
-                print(f"RL CSV not found => {rl_csv}")
-            self.logger.info("Skipping offline RL training.")
-            print("Skipping offline RL training.")
+            self.logger.info("Skipping RL training.")
+            print("Skipping RL training.")
             
-        self.logger.info("=== Training Pipeline Complete ===")
-        print("=== Training Pipeline Complete ===")
+        self.logger.info("=" * 80)
+        self.logger.info("TRAINING PIPELINE COMPLETE")
+        self.logger.info("=" * 80)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Ultra-optimized training script for memory-constrained environments"
+        description="Ultra-optimized training script for massive (500MB+) models"
     )
-    parser.add_argument("--csv", type=str, default="training_data/training_data.csv",
-                        help="Path to multi-output training_data.csv.")
+    parser.add_argument("--csv", type=str, default=LSTM_DATA_FILE,
+                        help="Path to multi-output training data CSV.")
     parser.add_argument("--model_out", type=str, default="models/advanced_lstm_model.keras",
                         help="File path for the LSTM model.")
-    parser.add_argument("--epochs", type=int, default=100, help="LSTM epochs.")
-    parser.add_argument("--early_stop_patience", type=int, default=20, help="early_stop_patience")
-    parser.add_argument("--batch_size", type=int, default=2, help="LSTM batch size (use small values like 2).")
-    parser.add_argument("--no_scale", action="store_true",
-                        help="Disable feature scaling.")
-    parser.add_argument("--skip_lstm", action="store_true",
-                        help="Skip LSTM training entirely.")
-    parser.add_argument("--max_rows", type=int, default=0, 
-                        help="Load x rows from csv file. 0 is all.")
-    parser.add_argument("--grad_accum", action="store_true", 
-                        help="Use gradient accumulation for memory efficiency")
-    parser.add_argument("--accum_steps", type=int, default=16,
-                        help="Number of gradient accumulation steps")
-    parser.add_argument("--model_size", type=str, default="small", 
-                        choices=["tiny", "small", "medium", "large", "xlarge"],
-                        help="Model size (tiny=24, small=32, medium=48, large=64, xlarge=96 units)")
-    parser.add_argument("--no_reduce_precision", action="store_true",
-                        help="Don't use reduced precision (use full float32)")
-
-    # RL
     parser.add_argument("--rl_csv", type=str, default=RL_TRANSITIONS_FILE,
                         help="Path to RL transitions CSV.")
     parser.add_argument("--rl_out", type=str, default="models/rl_DQNAgent.weights.h5",
                         help="Output file for RL weights.")
-    parser.add_argument("--rl_epochs", type=int, default=5,
+    parser.add_argument("--epochs", type=int, default=100, help="LSTM epochs.")
+    parser.add_argument("--early_stop_patience", type=int, default=20, help="early_stop_patience")
+    parser.add_argument("--batch_size", type=int, default=4, help="LSTM batch size. Use smaller values (2-4) for massive models.")
+    parser.add_argument("--rl_batch_size", type=int, default=64, help="RL batch size.")
+    parser.add_argument("--no_scale", action="store_true",
+                        help="Disable feature scaling.")
+    parser.add_argument("--skip_lstm", action="store_true",
+                        help="Skip LSTM training entirely.")
+    parser.add_argument("--skip_rl", action="store_true",
+                        help="Skip RL training entirely.")
+    parser.add_argument("--max_rows", type=int, default=0, 
+                        help="Load x rows from csv file. 0 is all.")
+    parser.add_argument("--grad_accum", action="store_true", 
+                        help="Use gradient accumulation for memory efficiency")
+    parser.add_argument("--accum_steps", type=int, default=8,
+                        help="Number of gradient accumulation steps")
+    parser.add_argument("--model_size", type=str, default="massive", 
+                        choices=["small", "medium", "large", "xlarge", "massive", "gigantic"],
+                        help="Model size (small=48, medium=64, large=96, xlarge=128, massive=512, gigantic=1024 units)")
+    parser.add_argument("--no_reduce_precision", action="store_true",
+                        help="Don't use reduced precision (use full float32)")
+    parser.add_argument("--rl_epochs", type=int, default=10,
                         help="Offline RL training epochs.")
-    parser.add_argument("--rl_batches", type=int, default=500,
-                        help="Offline RL mini-batch updates per epoch.")
+    parser.add_argument("--cache_batches", type=int, default=16,
+                        help="Number of batches to cache in memory (0 to disable)")
 
     return parser.parse_args()
 
 
 def main():
-    os.system('cls' if os.name=='nt' else 'clear')
-    print("\n" + "="*80)
-    print("ULTRA-OPTIMIZED TRADING BOT TRAINING SCRIPT")
-    print("="*80 + "\n")
-    
     args = parse_args()
+    
+    print("\n" + "="*80)
+    print("ULTRA-OPTIMIZED TRAINING SCRIPT FOR MASSIVE MODELS (500MB+)")
+    print("="*80 + "\n")
     
     # Print system information
     print(f"Python version: {sys.version}")
     print(f"TensorFlow version: {tf.__version__}")
     print(f"Number of CPUs: {os.cpu_count()}")
     print(f"Number of GPUs: {len(tf.config.experimental.list_physical_devices('GPU'))}")
-    print(f"Model size: {args.model_size.upper()}")
-    print(f"Training file: {args.csv}")
-    print(f"Script arguments: {args}")
-    print("="*80 + "\n")
-
-    # Configure GPU memory
+    
+    # Print GPU information if available
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
-        for gpu in gpus:
-            print(f"Found GPU: {gpu}")
+        for i, gpu in enumerate(gpus):
             try:
-                # Configure memory growth
-                tf.config.experimental.set_memory_growth(gpu, True)
-                print(f"Memory growth enabled for {gpu}")
-            except RuntimeError as e:
-                print(f"Error setting memory growth: {e}")
-                
-    # Check if CSV exists
-    if not os.path.exists(args.csv):
-        print(f"WARNING: Training CSV file not found at {args.csv}")
+                gpu_details = tf.config.experimental.get_device_details(gpu)
+                print(f"GPU {i}: {gpu_details.get('device_name', 'Unknown')} "
+                      f"({gpu_details.get('compute_capability', 'Unknown')})")
+            except:
+                print(f"GPU {i}: {gpu.name}")
     
+    print(f"Model size: {args.model_size.upper()}")
+    print(f"Training file: {args.csv}")
+    print(f"RL training file: {args.rl_csv}")
+    
+    # Print batch size and gradient accumulation settings
+    print(f"Batch size: {args.batch_size}, Gradient accumulation: {args.grad_accum}, "
+          f"Accumulation steps: {args.accum_steps}")
+    print(f"Effective batch size: {args.batch_size * (args.accum_steps if args.grad_accum else 1)}")
+    
+    print("="*80 + "\n")
+
     # Initialize trainer
     try:
         trainer = Trainer(
             training_csv=args.csv,
             model_out=args.model_out,
+            rl_transitions_csv=args.rl_csv,
+            rl_model_out=args.rl_out,
             epochs=args.epochs,
             batch_size=args.batch_size,
+            rl_batch_size=args.rl_batch_size,
             early_stop_patience=args.early_stop_patience,
             apply_scaling=not args.no_scale,
             skip_lstm=args.skip_lstm,
+            skip_rl=args.skip_rl,
             max_rows=args.max_rows,
             grad_accum=args.grad_accum,
             accum_steps=args.accum_steps,
             model_size=args.model_size,
-            reduce_precision=not args.no_reduce_precision
+            reduce_precision=not args.no_reduce_precision,
+            rl_epochs=args.rl_epochs,
+            cache_batches=args.cache_batches
         )
         
         # Run training
-        trainer.run(
-            rl_csv=args.rl_csv,
-            rl_out=args.rl_out,
-            rl_epochs=args.rl_epochs,
-            rl_batches=args.rl_batches
-        )
+        trainer.run()
+        
         print("\n" + "="*80)
         print("TRAINING COMPLETED SUCCESSFULLY")
         print("="*80 + "\n")
@@ -1286,9 +1179,21 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    
+    
+    
+    
+# Usage examples:
+# 
+# For massive model (500MB+):
+# python fitter.py --model_size massive --batch_size 4 --grad_accum --accum_steps 8 --rl_epochs 10 --no_reduce_precision
+#
+# For gigantic model (1GB+):
+# python fitter.py --model_size gigantic --batch_size 2 --grad_accum --accum_steps 16 --rl_epochs 5 --no_reduce_precision
+#
 
-
-
-# python fitter.py --no_reduce_precision --batch_size 8 --model_size xlarge --grad_accum --accum_steps 4
+# conda activate env3
+# dir_print . -I .git .gitignore dir_print.txt ^.md^ ^.png^ ^.csv^ ^.json^ ^.pyc^ ^input_cache^ ^logs_training^ -O ^.env^ ^config^ ^.txt^ ^.log^ -E dir_print.txt --sos --line-count
 # tensorboard --logdir=logs_training
 # nvidia-smi -l 1

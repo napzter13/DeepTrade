@@ -20,7 +20,9 @@ from .environment import (
 )
 from .nn_model import build_ensemble_model, safe_mse_loss
 # Add these imports to expose the classes needed by fitter.py
-from .nn_model import TimeSeriesEncoder, TabularEncoder, LightEnsembleModel
+from .nn_model import TimeSeriesEncoder, TabularEncoder
+# LightEnsembleModel was referenced but doesn't exist in nn_model.py
+# Remove or comment out this import
 
 logger = get_logger("Models")
 
@@ -167,7 +169,9 @@ def load_advanced_lstm_model(model_5m_window=241,
                              memory_efficient=True,
                              mixed_precision=True,
                              gradient_accumulation=False,
-                             gradient_accumulation_steps=8
+                             gradient_accumulation_steps=8,
+                             depth=6,  # Add depth parameter with default value
+                             massive_model=True  # Add massive_model parameter with default value
                              ):
     if os.path.exists(ADVANCED_MODEL_PATH):
         try:
@@ -186,11 +190,13 @@ def load_advanced_lstm_model(model_5m_window=241,
             window_1h=model_1h_window,   feature_1h=feature_dim,
             santiment_dim=santiment_dim,
             ta_dim=ta_dim,      signal_dim=signal_dim,
-            base_units = base_units,
-            memory_efficient = memory_efficient,
-            mixed_precision = mixed_precision,
-            gradient_accumulation = gradient_accumulation,
-            gradient_accumulation_steps = gradient_accumulation_steps)
+            base_units=base_units,
+            depth=depth,  # Pass the depth parameter
+            memory_efficient=memory_efficient,
+            mixed_precision=mixed_precision,
+            gradient_accumulation=gradient_accumulation,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            massive_model=massive_model)  # Pass the massive_model parameter
     
     plot_model(m, to_file="models/advanced_lstm_model_architecture.png", show_shapes=True, show_layer_names=True)
     
