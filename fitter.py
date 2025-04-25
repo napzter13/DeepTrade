@@ -1294,8 +1294,8 @@ if __name__ == "__main__":
 # conda activate env3
 
 
-# For large debug model:
-# python fitter.py --model_size large --batch_size 2 --grad_accum --accum_steps 1 --skip_rl --no_reduce_precision --delete_nn_model
+# For medium debug model:
+# python fitter.py --model_size medium --batch_size 2 --grad_accum --accum_steps 1 --skip_rl --no_reduce_precision --delete_nn_model
 
 # For gigantic model:
 # python fitter.py --model_size gigantic --batch_size 2 --grad_accum --accum_steps 16 --rl_epochs 5 --no_reduce_precision --delete_nn_model
