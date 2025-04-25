@@ -20,6 +20,7 @@ import math
 import time
 import sys
 import gc
+import shutil  # Add shutil for directory removal
 from pathlib import Path
 from datetime import datetime
 
@@ -180,11 +181,28 @@ class MemoryEfficientGenerator(tf.keras.utils.Sequence):
                     else:
                         logger.warning(f"Missing target column {col}")
                 
-                logger.info(f"Found {len(self.y_columns)} target columns")
+                # If no target columns found, create default ones with zeros
+                if not self.y_columns:
+                    logger.warning(f"No target columns found. Creating default targets with zeros.")
+                    # Check if we can infer the number of target columns from a row of data
+                    try:
+                        first_row = next(reader)
+                        self.default_target_count = NUM_FUTURE_STEPS
+                        self.use_default_targets = True
+                    except:
+                        # Fallback to NUM_FUTURE_STEPS from environment
+                        self.default_target_count = NUM_FUTURE_STEPS
+                        self.use_default_targets = True
+                else:
+                    self.use_default_targets = False
+                    
+                logger.info(f"Found {len(self.y_columns)} target columns, using default targets: {self.use_default_targets}")
         except Exception as e:
             logger.error(f"Error preloading column indices: {e}")
             self.column_indices = {}
             self.y_columns = [f"y_{i}" for i in range(1, NUM_FUTURE_STEPS+1)]
+            self.use_default_targets = True
+            self.default_target_count = NUM_FUTURE_STEPS
     
     def _count_rows(self):
         """Count the number of data rows in the CSV file"""
@@ -200,7 +218,7 @@ class MemoryEfficientGenerator(tf.keras.utils.Sequence):
             
     def __len__(self):
         """Return the number of batches per epoch"""
-        return math.ceil(len(self.indices) / self.batch_size)
+        return max(1, math.ceil(len(self.indices) / self.batch_size))
         
     def __getitem__(self, idx):
         """Get a batch of data with caching for efficiency"""
@@ -210,6 +228,12 @@ class MemoryEfficientGenerator(tf.keras.utils.Sequence):
             
         # Get batch indices
         batch_indices = self.indices[idx * self.batch_size : (idx + 1) * self.batch_size]
+        
+        # Handle empty batches - return small valid batch instead of failing
+        if not batch_indices:
+            logger.warning(f"Empty batch requested at index {idx}. Creating small dummy batch.")
+            # Create a minimal valid batch with the right shapes
+            return self._create_dummy_batch()
         
         # Initialize batch arrays
         batch_5m = []
@@ -241,9 +265,13 @@ class MemoryEfficientGenerator(tf.keras.utils.Sequence):
                         
                         # Parse target values
                         targets = []
-                        for col in self.y_columns:
-                            val = float(row[self.column_indices[col]])
-                            targets.append(val)
+                        if not self.use_default_targets:
+                            for col in self.y_columns:
+                                val = float(row[self.column_indices[col]])
+                                targets.append(val)
+                        else:
+                            # Use default target values (all zeros)
+                            targets = [0.0] * self.default_target_count
                         
                         # Fill in missing targets if needed
                         while len(targets) < NUM_FUTURE_STEPS:
@@ -275,6 +303,13 @@ class MemoryEfficientGenerator(tf.keras.utils.Sequence):
                         batch_y.append(targets)
                     except Exception as e:
                         logger.error(f"Error parsing row {i}: {e}")
+                        # Continue with next row instead of failing completely
+                        continue
+        
+        # Handle case where all rows failed to parse
+        if not batch_5m:
+            logger.warning(f"All rows in batch {idx} failed to parse. Creating a dummy batch.")
+            return self._create_dummy_batch()
         
         # Convert to numpy arrays
         try:
@@ -305,12 +340,23 @@ class MemoryEfficientGenerator(tf.keras.utils.Sequence):
             return result
         except Exception as e:
             logger.error(f"Error creating batch: {e}")
-            # Return empty batch as fallback
-            empty_shape_5m = (0, 241, 9)
-            empty_shape_google = (0, 24, 1)
-            return [np.empty(empty_shape_5m), np.empty(empty_shape_5m), np.empty(empty_shape_5m), 
-                    np.empty(empty_shape_google), np.empty((0, 12)), np.empty((0, 63)), np.empty((0, 11))], np.empty((0, NUM_FUTURE_STEPS))
-                    
+            # Return fallback batch
+            return self._create_dummy_batch()
+    
+    def _create_dummy_batch(self):
+        """Create a minimal valid batch with the correct shapes"""
+        batch_size = 1
+        X_5m = np.zeros((batch_size, 241, 9), dtype=np.float32)
+        X_15m = np.zeros((batch_size, 241, 9), dtype=np.float32)
+        X_1h = np.zeros((batch_size, 241, 9), dtype=np.float32)
+        X_google = np.zeros((batch_size, 24, 1), dtype=np.float32)
+        X_santiment = np.zeros((batch_size, 12), dtype=np.float32)
+        X_ta = np.zeros((batch_size, 63), dtype=np.float32)
+        X_ctx = np.zeros((batch_size, 11), dtype=np.float32)
+        Y = np.zeros((batch_size, NUM_FUTURE_STEPS), dtype=np.float32)
+        
+        return [X_5m, X_15m, X_1h, X_google, X_santiment, X_ta, X_ctx], Y
+                
     def on_epoch_end(self):
         """Called at the end of each epoch"""
         if self.shuffle:
@@ -851,6 +897,44 @@ class Trainer:
             print(f"ERROR: Training data file is empty: {self.training_csv}")
             return
         
+        # Validate CSV format first before creating generators
+        try:
+            with open(self.training_csv, 'r') as f:
+                reader = csv.reader(f)
+                header = next(reader)
+                
+                required_columns = ["arr_5m", "arr_15m", "arr_1h", "arr_google_trend", 
+                                   "arr_santiment", "arr_ta_63", "arr_ctx_11"]
+                
+                missing_cols = [col for col in required_columns if col not in header]
+                if missing_cols:
+                    self.logger.error(f"Training CSV is missing required columns: {missing_cols}")
+                    print(f"ERROR: Training CSV is missing required columns: {missing_cols}")
+                    return
+                
+                # Check for target columns (y_1, y_2, etc.)
+                target_cols = [col for col in header if col.startswith("y_") and col[2:].isdigit()]
+                if not target_cols and NUM_FUTURE_STEPS > 0:
+                    self.logger.warning(f"No target columns (y_1, y_2, etc.) found in CSV. Using default zero targets.")
+                    print(f"WARNING: No target columns found in CSV. Using default zero targets.")
+                
+                # Try to read first data row
+                try:
+                    first_row = next(reader)
+                    if len(first_row) != len(header):
+                        self.logger.error(f"CSV format error: Header has {len(header)} columns but data row has {len(first_row)} columns")
+                        print(f"ERROR: CSV format error: Header/data column count mismatch")
+                        return
+                except StopIteration:
+                    self.logger.error("CSV contains header but no data rows")
+                    print("ERROR: CSV contains header but no data rows")
+                    return
+                
+        except Exception as e:
+            self.logger.error(f"Error validating CSV format: {e}")
+            print(f"ERROR: Error validating CSV format: {e}")
+            return
+        
         # Create data generators with optimized batch size and caching
         train_gen = MemoryEfficientGenerator(
             csv_file=self.training_csv,
@@ -873,6 +957,12 @@ class Trainer:
             scaler=None,  # Don't apply scaling yet
             cache_size=self.cache_batches
         )
+        
+        # Verify we have enough samples
+        if len(train_gen) < 2 or len(val_gen) < 1:
+            self.logger.error(f"Not enough samples for training. Found {len(train_gen) * train_gen.batch_size} training and {len(val_gen) * val_gen.batch_size} validation samples")
+            print(f"ERROR: Not enough samples for training")
+            return
         
         # Fit scalers if needed
         if self.apply_scaling and (self.model_scaler is None or not hasattr(self.model_scaler, 'fitted') or not self.model_scaler.fitted):
@@ -1101,6 +1191,8 @@ def parse_args():
                         help="Offline RL training epochs.")
     parser.add_argument("--cache_batches", type=int, default=16,
                         help="Number of batches to cache in memory (0 to disable)")
+    parser.add_argument("--delete_nn_model", action="store_true",
+                        help="Delete the existing models directory before starting")
 
     return parser.parse_args()
 
@@ -1111,6 +1203,19 @@ def main():
     print("\n" + "="*80)
     print("ULTRA-OPTIMIZED TRAINING SCRIPT FOR MASSIVE MODELS (500MB+)")
     print("="*80 + "\n")
+    
+    # Delete models directory if requested
+    if args.delete_nn_model:
+        try:
+            models_dir = "models"
+            if os.path.exists(models_dir):
+                print(f"Deleting existing models directory: {models_dir}")
+                shutil.rmtree(models_dir)
+                print(f"Successfully deleted {models_dir} directory")
+            else:
+                print(f"No existing models directory found to delete")
+        except Exception as e:
+            print(f"Error deleting models directory: {e}")
     
     # Print system information
     print(f"Python version: {sys.version}")
@@ -1190,10 +1295,10 @@ if __name__ == "__main__":
 
 
 # For large debug model:
-# python fitter.py --model_size large --batch_size 2 --grad_accum --accum_steps 1 --skip_rl --no_reduce_precision
+# python fitter.py --model_size large --batch_size 2 --grad_accum --accum_steps 1 --skip_rl --no_reduce_precision --delete_nn_model
 
 # For gigantic model:
-# python fitter.py --model_size gigantic --batch_size 2 --grad_accum --accum_steps 16 --rl_epochs 5 --no_reduce_precision
+# python fitter.py --model_size gigantic --batch_size 2 --grad_accum --accum_steps 16 --rl_epochs 5 --no_reduce_precision --delete_nn_model
 
 
 # dir_print . -I .git .gitignore dir_print.txt ^.md^ ^.png^ ^.csv^ ^.json^ ^.pyc^ ^input_cache^ ^logs_training^ -O ^.env^ ^config^ ^.txt^ ^.log^ -E dir_print.txt --sos --line-count

@@ -75,6 +75,46 @@ setup_gpu_memory()
 # =============================================================================
 
 @tf.keras.utils.register_keras_serializable(package="botlib")
+class CustomMaskLayer(layers.Layer):
+    """Properly serializable mask layer for attention mechanisms"""
+    
+    def __init__(self, **kwargs):
+        super(CustomMaskLayer, self).__init__(**kwargs)
+    
+    def call(self, inputs):
+        return inputs
+    
+    def get_config(self):
+        config = super(CustomMaskLayer, self).get_config()
+        return config
+    
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+
+@tf.keras.utils.register_keras_serializable(package="botlib")
+class StackLayer(layers.Layer):
+    """Custom layer to stack tensors along a specified axis"""
+    
+    def __init__(self, axis=1, **kwargs):
+        super(StackLayer, self).__init__(**kwargs)
+        self.axis = axis
+    
+    def call(self, inputs):
+        return tf.stack(inputs, axis=self.axis)
+    
+    def get_config(self):
+        config = super(StackLayer, self).get_config()
+        config.update({'axis': self.axis})
+        return config
+    
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+
+@tf.keras.utils.register_keras_serializable(package="botlib")
 def safe_mse_loss(y_true: TensorType, y_pred: TensorType) -> tf.Tensor:
     """
     Numerically stable MSE loss function with safeguards against NaN values
@@ -210,6 +250,14 @@ class TimeSeriesEncoder(layers.Layer):
             'name': self.name_prefix
         })
         return config
+    
+    @classmethod
+    def from_config(cls, config):
+        # Handle name attribute compatibility
+        name = config.pop('name', None)
+        if name is not None:
+            config['name'] = name
+        return cls(**config)
 
 
 @tf.keras.utils.register_keras_serializable(package="botlib")
@@ -282,6 +330,14 @@ class TabularEncoder(layers.Layer):
             'name': self.name_prefix
         })
         return config
+    
+    @classmethod
+    def from_config(cls, config):
+        # Handle name attribute compatibility
+        name = config.pop('name', None)
+        if name is not None:
+            config['name'] = name
+        return cls(**config)
 
 
 # =============================================================================
@@ -400,18 +456,18 @@ def build_ensemble_model(
     feat_ta = tab_encoder_ta(input_ta)
     feat_signal = tab_encoder_signal(input_signal)
     
-    # Enhanced cross-attention mechanism
+    # Enhanced cross-attention mechanism with proper serialization
     # First, stack the time series features
-    time_features = tf.stack([feat_5m, feat_15m, feat_1h], axis=1)
+    time_features = StackLayer(axis=1)([feat_5m, feat_15m, feat_1h])
     
     # Apply attention mechanism
-    attention_query = layers.Dense(actual_units, activation='tanh')(time_features)
-    attention_weights = layers.Dense(1)(attention_query)
-    attention_weights = layers.Softmax(axis=1)(attention_weights)
+    attention_query = layers.Dense(actual_units, activation='tanh', name="attention_query")(time_features)
+    attention_weights = layers.Dense(1, name="attention_weights")(attention_query)
+    attention_weights = layers.Softmax(axis=1, name="attention_softmax")(attention_weights)
     
     # Apply attention to get weighted time series features
-    cross_context = layers.Multiply()([time_features, attention_weights])
-    cross_context = layers.Lambda(lambda x: tf.reduce_sum(x, axis=1))(cross_context)
+    cross_context = layers.Multiply(name="attention_apply")([time_features, attention_weights])
+    cross_context = layers.Lambda(lambda x: tf.reduce_sum(x, axis=1), name="attention_reduce")(cross_context)
     
     # Concatenate all features
     combined = layers.Concatenate(name="all_features")([
@@ -420,33 +476,42 @@ def build_ensemble_model(
     
     # Shared trunk network with residual connections
     x = combined
-    for i in range(2):  # Simplified trunk with just 2 blocks
+    for i in range(3):  # Increased depth
         # First dense block
         residual = x
-        x = layers.Dense(actual_units * 2, activation='relu')(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.Dropout(0.2)(x)
+        x = layers.Dense(actual_units * 2, activation='relu', name=f"trunk_dense_{i}_1")(x)
+        x = layers.BatchNormalization(name=f"trunk_bn_{i}_1")(x)
+        x = layers.Dropout(0.2, name=f"trunk_drop_{i}_1")(x)
         
         # Second dense block 
-        x = layers.Dense(actual_units * 2)(x)
-        x = layers.BatchNormalization()(x)
+        x = layers.Dense(actual_units * 2, name=f"trunk_dense_{i}_2")(x)
+        x = layers.BatchNormalization(name=f"trunk_bn_{i}_2")(x)
         
         # Add residual connection with projection if needed
         if residual.shape[-1] != x.shape[-1]:
-            residual = layers.Dense(x.shape[-1])(residual)
+            residual = layers.Dense(x.shape[-1], name=f"trunk_proj_{i}")(residual)
             
-        x = layers.Add()([x, residual])
-        x = layers.Activation('relu')(x)
-        x = layers.Dropout(0.2)(x)
+        x = layers.Add(name=f"trunk_add_{i}")([x, residual])
+        x = layers.Activation('relu', name=f"trunk_act_{i}")(x)
+        x = layers.Dropout(0.2, name=f"trunk_drop_{i}_2")(x)
+    
+    # Advanced feature extraction before output
+    x = layers.Dense(actual_units * 3, activation='relu', name="pre_output_dense")(x)
+    x = layers.BatchNormalization(name="pre_output_bn")(x)
+    x = layers.Dropout(0.3, name="pre_output_drop")(x)
     
     # Multiple output heads for different time horizons
     outputs = []
     for i in range(NUM_FUTURE_STEPS):
+        # Create a specialized head for each prediction step
+        output_branch = layers.Dense(actual_units, activation='relu', name=f"output_dense1_{i+1}")(x)
+        output_branch = layers.BatchNormalization(name=f"output_bn_{i+1}")(output_branch)
+        output_branch = layers.Dense(actual_units // 2, activation='relu', name=f"output_dense2_{i+1}")(output_branch)
         head = layers.Dense(
             1, 
             activation='tanh',  # tanh for [-1,1] range 
             name=f"output_{i+1}"
-        )(x)
+        )(output_branch)
         outputs.append(head)
     
     # Concatenate all outputs
@@ -459,10 +524,12 @@ def build_ensemble_model(
         name="multi_timeframe_trading_model"
     )
     
-    # Compile the model
+    # Compile the model with robust optimizer settings
     optimizer = optimizers.Adam(
-        learning_rate=0.001,
-        clipnorm=1.0,  # Add gradient clipping for stability
+        learning_rate=0.0005,  # Reduced learning rate for better convergence
+        clipnorm=1.0,          # Gradient clipping for stability
+        beta_1=0.9,
+        beta_2=0.999,
         epsilon=1e-7
     )
     
@@ -471,6 +538,15 @@ def build_ensemble_model(
         loss=safe_mse_loss,
         metrics=['mae']  # Mean Absolute Error
     )
+    
+    # Register custom objects for serialization
+    tf.keras.utils.get_custom_objects().update({
+        'safe_mse_loss': safe_mse_loss,
+        'TimeSeriesEncoder': TimeSeriesEncoder,
+        'TabularEncoder': TabularEncoder,
+        'CustomMaskLayer': CustomMaskLayer,
+        'StackLayer': StackLayer
+    })
     
     # Print model summary
     total_params = model.count_params()
@@ -501,6 +577,15 @@ def load_advanced_lstm_model(
     **kwargs
 ) -> keras.models.Model:
     """Wrapper for backwards compatibility"""
+    # Register custom objects to ensure proper loading
+    tf.keras.utils.get_custom_objects().update({
+        'safe_mse_loss': safe_mse_loss,
+        'TimeSeriesEncoder': TimeSeriesEncoder,
+        'TabularEncoder': TabularEncoder,
+        'CustomMaskLayer': CustomMaskLayer,
+        'StackLayer': StackLayer
+    })
+    
     return build_ensemble_model(
         model_5m_window=model_5m_window,
         model_15m_window=model_15m_window,
