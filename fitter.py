@@ -1301,7 +1301,7 @@ if __name__ == "__main__":
 # python fitter.py --model_size gigantic --batch_size 2 --grad_accum --accum_steps 16 --rl_epochs 5 --no_reduce_precision --delete_nn_model
 
 
-# dir_print . -I .git .gitignore dir_print.txt ^.md^ ^.png^ ^.csv^ ^.json^ ^.pyc^ ^input_cache^ ^logs_training^ -O ^.env^ ^config^ ^.txt^ ^.log^ -E dir_print.txt --sos --line-count
+# dir_print . -I .git .gitignore dir_print.txt 2022 2023 2024 2025 -O ^.png^ ^.csv^ ^.json^ ^.pyc^ ^input_cache^ ^logs_training^ ^.env^ ^config^ ^.txt^ ^.log^ -E dir_print.txt --sos --line-count
 
 # tensorboard --logdir=logs_training
 # nvidia-smi -l 1
